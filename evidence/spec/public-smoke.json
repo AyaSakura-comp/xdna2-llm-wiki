@@ -1,0 +1,12 @@
+{
+  "base": "https://raw.githack.com/AyaSakura-comp/TempHtml/a854a819b694c503e1240661a0e9fbb15021843e/xdna2-llm-wiki/",
+  "checks": [
+    "githack consent when shown",
+    "39 visible articles",
+    "6/39 source-spec search",
+    "spec hub link",
+    "cycle article navigation"
+  ],
+  "page_errors": [],
+  "scope": "opted-in public smoke; not full deployed E2E"
+}

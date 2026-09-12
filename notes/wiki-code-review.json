@@ -1,0 +1,50 @@
+{
+  "passed": true,
+  "security_concerns": [
+    {
+      "severity": "low",
+      "blocking": false,
+      "location": "wiki/build.py:38-47",
+      "finding": "The authored-HTML checks are a defensive denylist, not a general-purpose sanitizer: base/meta/link and attributes other than href/src can pass. No active authored HTML was found in the current generated articles, and arbitrary-content ingestion is explicitly out of scope, so this is not a current exploitable-content finding.",
+      "recommendation": "Keep the trusted-author boundary explicit. If that boundary changes, require an allowlist sanitizer and regression cases before accepting external Markdown/HTML. Optionally reject base/meta/link now to prevent accidental navigation or stylesheet changes."
+    }
+  ],
+  "logic_errors": [
+    {
+      "severity": "low",
+      "blocking": false,
+      "location": "wiki/assets/model.js:19-25; wiki/assets/app.js:30; wiki/build.py:85-86",
+      "finding": "GEMM accepts arbitrarily tiny positive TOPS/bandwidth, although the HTML inputs specify min=0.1. The input/change handler calculates without checking form validity, and derived timings are not checked for finiteness. An extreme typed value can therefore display Infinity as an ordinary result rather than an error.",
+      "reproduction": "Verified with Node: gemm({m:512,k:4096,n:4096,inputBytes:2,outputBytes:4,tops:1e-320,bandwidth:50}).lowerSeconds is Infinity; bandwidth:1e-320 also produces Infinity. tops:0.01 is accepted despite the UI minimum.",
+      "recommendation": "Align the model's lower limits with the UI, validate form constraints before calculating, and reject non-finite derived timings. Add tiny-positive and minimum-boundary tests. Normal defaults, integer dimensions, overflow rejection, and the KV/GEMM formulas passed review."
+    }
+  ],
+  "suggestions": [
+    {
+      "severity": "low",
+      "location": "wiki/build.py:96-130",
+      "suggestion": "For reproducible publication across content removals, remove stale owned outputs or generate into a clean staging directory and atomically publish. mkdir/copytree(dirs_exist_ok=True) leaves deleted articles/assets behind, and a late rendering error can leave a mixed build. Existing sorted inputs, stable ordering, and fixed STAMP make current content ordering deterministic; no rebuild was performed to claim byte-for-byte reproducibility."
+    },
+    {
+      "severity": "low",
+      "location": "wiki/build.py:15-27,96-106",
+      "suggestion": "Reserve generated names such as index as article slugs, and optionally reject output symlinks before writing. The current slug regex prevents content-driven traversal and ROOT is script-relative; no symlinks or publication-escaping local links were found. A future authored slug=index would nevertheless collide with the home page."
+    },
+    {
+      "severity": "low",
+      "location": "wiki/build.py:111-116; tests/test_wiki.py",
+      "suggestion": "Preserve or explicitly translate fragments when converting article.html#fragment to Markdown; the current rewrite drops the fragment/query. Current authored cross-article links contain no local fragments, so this is not an existing broken link. Extend automated tests to all Markdown/full exports and guide HTML, including publication-root containment and fragment cases; the supplied test only checks three Markdown evidence paths and root HTML."
+    },
+    {
+      "severity": "low",
+      "location": "wiki/assets/app.js:43-48; wiki/build.py:54",
+      "suggestion": "Announce copy success/failure through a live status region or update the accessible name. Changing button.textContent does not replace its fixed aria-label, so screen-reader users may miss the clipboard fallback message. Copy uses textContent/writeText rather than HTML or execution, and manual code selection remains available."
+    },
+    {
+      "severity": "low",
+      "location": "wiki/assets/app.js:19",
+      "suggestion": "Treat history.replaceState as optional URL synchronization and guard failures, so restricted/file-origin browser policies cannot throw during search initialization or input. Search uses local bundled data and safe text/value/hidden updates, with no fetch dependency or query-to-HTML sink. Actual browser/file-origin interaction remains with the parent's QA."
+    }
+  ],
+  "summary": "PASS means no release-blocking security, path-safety, link, accessibility-logic, or ordinary-input math defect was found within this trusted local-authored static-wiki scope; one non-blocking extreme-number validation defect is recorded separately. Read all six requested source/test files completely, generated index.html and kv-cache.html, and the wiki-method Markdown export. node --test tests/wiki-model.test.cjs passed 7/7; python3 -m unittest discover -s tests -p test_wiki.py passed 4/4 against the existing build. A separate read-only audit checked 2,620 local links across recursive HTML, article Markdown, llms.txt and llms-full.txt: no missing destinations, HTML anchors, or paths outside wiki-site. No remote runtime assets or active authored article HTML were found; generated app.js/model.js/wiki.css match source. Escaped metadata, constrained slugs, JSON serialization with less-than escaping, literal search matching, textContent result updates, and explicit user-triggered plain-text clipboard writes avoid the examined injection sinks. Exports retain sources and evidence caveats, and llms/full-text plus wiki-method explicitly identify research as reference data rather than tool instructions. The CSS and semantic markup support the requested Japanese-white visual direction with Traditional Chinese content; visual, interactive, contrast, and clipboard browser QA remain with the parent. External source availability and hardware claims were not independently revalidated. No rebuild, source edits, delegation, web access, dependency installation, preview-service interaction, or NPU execution was performed; this report is the only intentionally written file."
+}

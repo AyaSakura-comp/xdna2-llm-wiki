@@ -1,0 +1,6 @@
+[submodule "sources/llvm-aie"]
+	path = sources/llvm-aie
+	url = https://github.com/Xilinx/llvm-aie.git
+[submodule "sources/mlir-aie"]
+	path = sources/mlir-aie
+	url = https://github.com/Xilinx/mlir-aie.git

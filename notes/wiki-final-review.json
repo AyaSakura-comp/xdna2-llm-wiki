@@ -1,0 +1,24 @@
+{
+  "passed": true,
+  "security_concerns": [],
+  "logic_errors": [],
+  "factual_errors": [],
+  "suggestions": [
+    {
+      "blocking": false,
+      "location": "wiki/build.py:render_body",
+      "suggestion": "Keep the trusted-author boundary explicit. The new tag allowlist rejects base/meta/link and dangerous tags, but is not a general-purpose attribute sanitizer. Require attribute/URL allowlisting and adversarial regression tests before accepting external authored HTML. This is future hardening, not an unresolved current-content blocker."
+    },
+    {
+      "blocking": false,
+      "location": "wiki/build.py:build/load_articles/md_target",
+      "suggestion": "Carry forward optional clean/atomic publication, reserved generated slugs, output-symlink protection, and Markdown fragment/query preservation with broader export tests. These prior hardening suggestions remain outside this bounded fix; no current-content blocker was identified."
+    },
+    {
+      "blocking": false,
+      "location": "tests/wiki-model.test.cjs; tests/test_wiki.py; wiki/assets/app.js",
+      "suggestion": "Consider retaining automated history SecurityError/unrelated-error and clipboard success/failure accessible-name checks in the test suite. Independent in-memory checks passed here; actual browser/assistive-technology behavior and rebuilt output equality remain for parent QA."
+    }
+  ],
+  "summary": "PASS for the bounded source re-review: no unresolved blocking security, logic, or factual findings. Concern/error arrays deliberately contain blockers only and are empty; nonblocking future hardening is separately recorded in suggestions. Read both prior reports and the fix result, then independently inspected the actual glossary in wiki/compose_llm.py and wiki/content/llm.json, model.js GEMM, app.js history/copy, and build.py render_body. The VLIW correction and inline/source-list citation now distinguish compiler-scheduled exposed-pipeline instruction dependencies from lock/stream dataflow waits. Read local Peano README lines 29-45; repository HEAD equals pinned 386ca5c6634a84bb224b7248e79df8edabf0722f and README has no diff against that commit. GEMM rejects 0.01 and 1e-320 TOPS/bandwidth, accepts the 0.1 boundary, and checks derived timings for finiteness without changing ordinary formulas. The renderer applies its tag allowlist before inserting generated wrappers/buttons and retains event/URI checks. In-memory rendering of all 27 bodies succeeded, with TOC/copy-button structure checked and nine dangerous markup probes rejected; this was compatibility testing, not a repeat factual audit. Independent Node VM checks confirmed search continues after history SecurityError, unrelated errors propagate, and clipboard success/failure both update the accessible name while copying literal text. node --test tests/wiki-model.test.cjs passed 8/8; PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests -p test_wiki.py passed 6/6. Publication-facing tests used existing output and do not prove rebuilt artifact freshness or generation equality. Parent must rebuild, check output equality, and rerun E2E. No production edits/build, web access, services, NPU execution, or delegation; only notes/wiki-final-review.json was intentionally written."
+}

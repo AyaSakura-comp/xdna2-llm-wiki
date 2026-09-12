@@ -1,0 +1,510 @@
+[
+  {
+    "slug": "compiler",
+    "title": "編譯器分工：從資料流到 XDNA2 產物",
+    "summary": "辨別 IRON／Peano、Triton／AIR 與 host runtime 的責任，避免把編譯成功、產物格式與 NPU 實測混為一談。",
+    "category": "程式設計",
+    "tags": [
+      "MLIR",
+      "Peano",
+      "AIR",
+      "編譯產物"
+    ],
+    "status": "來源查核",
+    "body": "## 先分清三種責任\n\nXDNA2 程式不是把一般 Python 交給 NPU 解譯。IRON 描述空間資料流，MLIR-AIE 配置核心、記憶體、DMA 與連線；Peano 是擴充 LLVM 的逐核心編譯器，能編譯 C++ 向量核心。主機 runtime 則負責載入配置、提供緩衝與提交工作，並不代替編譯器決定矩陣分塊。這些界線由 [IRON / MLIR-AIE 專案說明](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/README.md) 與 [IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 交叉說明。選工具時，應先問要手控資料流，還是以高階算子配合映射配方產生核心。\n\n本系列查核固定來源，沒有建置工具鏈或執行 NPU。原始碼可證明某條轉換路徑存在，不能證明特定模型在本機已成功編譯，更不能直接推出效能排名。硬體 primitive、C++ API、MLIR lowering 與前端測試，是四個不同的支援層級。\n\n## 兩條入口不是兩套互斥硬體\n\n| 入口或階段 | 使用者提供 | 主要責任 |\n|---|---|---|\n| IRON | Worker、ObjectFifo、Runtime | 明確描述計算與資料移動 |\n| Peano | 核心程式或降階 LLVM IR | 逐核心指令選擇、配置與連結 |\n| Triton-XDNA | Triton kernel 與 Transform 配方 | 從張量計算推導分塊與平行映射 |\n| MLIR-AIR／AIE | 分層資料流與陣列描述 | 降階為核心、DMA、配置與指令流 |\n| host runtime | 編譯產物及參數緩衝 | ABI 配對、提交、等待與回收 |\n\n[Triton-XDNA：編譯與 runtime](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/README.md) 的路徑是 Triton → triton-shared → Linalg → Transform → AIR → AIE。不能把 AIR 說成另一個 GPU runtime，也不能把 Peano 說成整張 LLM 計算圖的自動切分器。IRON 的控制較直接，代價是資料搬移與同步設計責任也較清楚地落在作者身上；兩條入口都有值得研究的工作負載，沒有普遍最佳解。\n\n## 用映射 IR 讀懂分塊\n\n以下節錄 [AIE2P matmul Transform IR](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/matmul_bf16_m64_n64_k64/transform_aie2p.mlir)，是「改寫計算的配方」，不是 AIE 機器指令，也不是完整可獨立執行模組：\n\n```mlir\n%packed = transform.structured.pack %matmul_to_pack packed_sizes = [8, 8, 8]\n  : (!transform.any_op) -> (!transform.any_op)\n%tiled_reduction, %outer_for_loop =\n  transform.structured.tile_using_for %packed_c tile_sizes [0, 0, 8]\n  : (!transform.any_op) -> (!transform.any_op, !transform.any_op)\n```\n\n第一段改變運算所見的打包形狀，後續還有 A、B、C 的轉置；第二段切的是打包後的 K，配方註明八個打包單位對應六十四個原始 K 元素。其後才分派多核心 herd、配置記憶體空間與向量化。故 `[8,8,8]` 不表示整個 kernel 只計算八階矩陣，更不能從一行 pack 推算每週期乘法數。解讀需同時看外層 tile、內層向量形狀、累加型別與 DMA 順序。\n\n## 產物名稱相似，角色不相同\n\n[aiecc 產物與建置圖](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/tools/aiecc/README.md#L29-L49) 區分配置 xclbin 加獨立指令流，以及包含 PDI／指令流的 full-ELF。[IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 又列出逐核心 ELF、核心物件、PDI、指令 ELF；看到副檔名 `.elf`，必須追問是核心可執行檔，還是主機載入的封裝。\n\n預設 IRON XRT 文件以 `final.xclbin + insts.bin` 為輸入。Triton 的 [Triton runtime 與格式選擇](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/amd_triton_npu/backend/driver.py#L1093-L1133) 則在 XRT 下自動選 npu2 的 ELF、npu1 的 xclbin，在 HSA 下強制 PDI 加指令 sidecar。不能把這幾種檔案任意更名互換，或將 IRON 預設流程的限制套到所有後端。另見 [執行期與 ABI](runtime.html)。\n\n## 版本鎖比下載時間重要\n\nTriton 的 [Triton 的 AIR 版本鎖](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/mlir-air-hash.txt) 指定 AIR commit `6746658`；[Triton 的 Peano 版本鎖](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/peano-requirements.txt) 指定 `llvm-aie==22.0.0.2026090201+a36c62b9`，並由 AIR wheel 的相依資訊間接鎖定 AIE。這不是本機另外下載的 AIR、AIE、Peano HEAD 自動構成的相容組合。保存來源快照有助閱讀，卻不等於取得可直接組裝的離線建置套件。\n\n實務上應記錄前端、Transform、AIR、AIE、核心 compiler、runtime ABI 與目標世代，避免只寫「最新版」。IRON 與 Triton 的環境宜分開管理；本頁不要求安裝、更新 ROCm 或變更驅動。將來重現時先依所選專案的版本鎖建立隔離環境，而不是混用全域 Python 套件。\n\n## 編譯成功之後仍有驗證工作\n\n[IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 的 recipe hash 描述生成配方，artifact hash 還考慮工具與檔案的新鮮度；快取命中只代表可重用產物，不代表新輸入通過數值檢查。對每個 kernel，還應保存真實尺寸、補齊尺寸、輸入／累加／輸出型別、誤差門檻及主機呼叫方式。\n\n若錯誤出現在 linked core、DMA 配置或提交階段，分別保留對應 IR、連結報告與 runtime 訊息，不要統稱「NPU 不支援」。特別是 f32 結果不證明原生 f32 乘法；整數也需核對 signedness 與溢位。下一步可依 [IRON 入門](iron.html)、[Triton 映射](triton.html) 或 [除錯](debug.html) 選擇最小證據鏈，再擴張到模型。\n\n## 建立跨階段的診斷紀錄\n\n可以把一次未來實驗的紀錄拆成四張表：生成表寫問題形狀與資料排列；編譯表寫目標、版本鎖和各階段產物；執行表寫載入方式、引數與同步；驗證表寫輸入分布、比較方法與結果。這是工程建議，並非本次已完成的測試。四張表透過同一個實驗識別碼相連，才能避免拿另一個分塊方案的速度，搭配目前方案的正確性結果。\n\n例如數學輸入只有一列，但 wrapper 為映射補出許多零列，生成表應同時列真實列數與編譯列數；輸出裁切亦應記錄，因為忽略它可能把補齊區的錯誤當成有效輸出，或反過來把未寫入的有效區藏起來。若改變資料型別，除了前端 tensor 宣告，還要核對內核輸入、累加器、輸出儲存與主機參考計算的型別，不能只看最後印出的 dtype。\n\n對配置式陣列而言，計算和通訊常由不同產物描述。核心反組譯能幫助確認指令選擇，卻無法單獨證明主機送進來的資料順序；DMA 的圖也無法單獨證明內核乘法的精度。因此一次成功的端到端驗證，必須讓形狀、布局、型別、配置和呼叫方式同時吻合。這也說明為何換前端或 runtime 後，不能只沿用某個核心測試的結論。", 
+    "sources": [
+      {
+        "label": "IRON / MLIR-AIE 專案說明",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/README.md",
+        "note": "Python 空間資料流、Peano 與版本配對原則。"
+      },
+      {
+        "label": "IRON 編譯階段與產物",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md",
+        "note": "JIT、recipe / artifact hash、核心 ELF 與預設 XRT 載入。"
+      },
+      {
+        "label": "Triton-XDNA：編譯與 runtime",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/README.md",
+        "note": "固定快照的流程、依賴與 runtime 條件；不是本機驗證。"
+      },
+      {
+        "label": "AIE2P matmul Transform IR",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/matmul_bf16_m64_n64_k64/transform_aie2p.mlir",
+        "note": "pack、K reduction、memory space 與 herd mapping。"
+      },
+      {
+        "label": "aiecc 產物與建置圖",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/tools/aiecc/README.md#L29-L49",
+        "note": "xclbin 指令流與 full-ELF 為不同輸出方案。"
+      },
+      {
+        "label": "Triton runtime 與格式選擇",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/amd_triton_npu/backend/driver.py#L1093-L1133",
+        "note": "HSA 強制 PDI；XRT 自動選 npu2 ELF、npu1 xclbin。"
+      },
+      {
+        "label": "Triton 的 AIR 版本鎖",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/mlir-air-hash.txt",
+        "note": "指定 AIR 6746658；不能拿獨立下載的 AIR HEAD 代替。"
+      },
+      {
+        "label": "Triton 的 Peano 版本鎖",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/peano-requirements.txt",
+        "note": "指定 wheel 版本；註解記載混版曾使 stack 問題表現成 NaN。"
+      }
+    ],
+    "related": [
+      "iron",
+      "triton",
+      "runtime",
+      "datatypes",
+      "debug"
+    ]
+  },
+  {
+    "slug": "iron",
+    "title": "IRON：以 Worker 與 ObjectFifo 設計資料流",
+    "summary": "從生成式 Python、FIFO 所有權到 Runtime 等待，建立可讀、可查核的 XDNA2 空間程式。",
+    "category": "程式設計",
+    "tags": [
+      "IRON",
+      "ObjectFifo",
+      "Worker",
+      "DMA"
+    ],
+    "status": "來源查核",
+    "body": "## Python 是設計生成器\n\nIRON 的 Python 執行在主機上，生成將被降階的 MLIR；不是讓 AIE 核心直接跑 Python。[IRON 結構元件](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-1/README.md) 特別區分 `range_` 與 Python `range`：前者建立裝置迴圈，後者在生成時反覆展開敘述。原生 `if` 同樣依生成時條件選擇程式，不應拿來表達未知的裝置端分支。\n\n`Worker` 表示一個計算核心上的程式；指定 `Tile(0,2)` 是固定位置，未指定則留待 placement。`Program.resolve_program()` 將元件關係組合起來，之後仍要配置實體位置、緩衝及路由。這種分層使「能生成 MLIR」與「放得進目標分區」成為可分辨的兩個驗證關卡。\n\n## 元件與資料契約\n\n| 元件 | 契約 | 容易誤解之處 |\n|---|---|---|\n| Buffer | 核心可見的有型別儲存 | 不等於主機 tensor 的原始指標 |\n| ObjectFifo | 有序、固定物件型別的資料流 | depth 是物件數，不是位元組數 |\n| Worker | 核心函式及其參數、放置條件 | Python 函式只是生成來源 |\n| Runtime | host-facing 引數與搬移序列 | 不等同 XRT／HSA 主機函式庫 |\n| Program | 串接 Worker、Runtime、裝置 | resolve 不等於 NPU 已執行 |\n\n依 [ObjectFifo 語意](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2a/README.md)，ObjectFifo 只有一個 producer，可有多個 consumer；預設 depth 為二，表示常見的 ping-pong buffering。對同一 FIFO 呼叫 `prod()` 取得同一 producer handle，`cons()` 則建立對應 consumer 的 handle。若把兩個獨立寫入者當成合法多 producer，問題不是加深 FIFO 就能解決，而是資料流契約本身需重設。\n\n## acquire 與 release 是所有權協定\n\n核心應先取得物件，再計算，最後交還。以下為 [ObjectFifo 語意](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2a/README.md) 的 handle 用法縮寫，僅展示函式內片段，並非完整設計：\n\n```python\nitem = of_in.acquire(1)\nresult = of_out.acquire(1)\n#在已取得的輸入／輸出物件上計算\nof_in.release(1)\nof_out.release(1)\n```\n\n尚未 release 的物件仍屬於這次持有範圍；連續 acquire 不能想成無限追加新物件。多物件 acquire 的索引零代表最舊的持有物件，release 也依舊到新交還。這是滑動視窗能重用資料的基礎，亦是常見死鎖來源。每個 consumer 的進度都必須與 producer 配合；只看算子數量相等，不能證明資料流能向前推進。連結 [同步](synchronization.html) 可將 FIFO 協定與硬體 lock 區分開。\n\n## Runtime 等待必須覆蓋整條依賴\n\n[IRON Runtime tasks](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2d/RuntimeTasks.md) 的序列以 producer handle `fill(a)` 傳入資料，以 consumer handle `drain(c, wait=True)` 收回結果。Worker 是交給 `Program(..., workers=[...])`，不是在 sequence 內以舊版啟動 API 呼叫。shim 位置如需固定，是放在建立 handle 的 `prod(tile=...)`／`cons(tile=...)`，不是憑空加給 fill。\n\nTaskGroup 結束會等有標記的工作，然後回收整組資源。輸入 fill 可以不單獨等待的前提，是已等待的輸出 drain 必然依賴該輸入完成。若某個旁支沒有通往任何已等待的輸出，就可能先回收仍在使用的 BD。此處的優化問題是依賴證明，不是「wait 越少越快」；主機能讀結果，也不代表所有背景工作皆已安全結束。\n\n## 從單核心例子走向矩陣乘法\n\n[IRON vector_scalar_add 範例](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_examples/basic/vector_scalar_add/vector_scalar_add.py) 使用 `@iron.jit` 加上 `transform(lambda x: x + 1, ...)`，把 FIFO、Worker 與 memtile staging 細節交給演算法輔助層。以下是已核對路徑及參數、但未執行的範例；須先有相符工具環境：\n\n```bash\ncd sources/mlir-aie\npython3 programming_examples/basic/vector_scalar_add/vector_scalar_add.py \\\n  --dev npu2 --emit-mlir\n```\n\n若要閱讀多核心 GEMM，可參照 [IRON whole_array 矩陣乘法](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_examples/basic/matrix_multiplication/whole_array/whole_array.py#L442-L524)。以下亦未執行；若實際執行將編譯並測試，八欄必須符合可用硬體分區：\n\n```bash\ncd sources/mlir-aie/programming_examples/basic/matrix_multiplication/whole_array\npython3 whole_array.py --dev npu2 --n-aie-cols 8 \\\n  -M 512 -K 512 -N 512 -m 64 -k 64 -n 32 \\\n  --dtype_in bf16 --dtype_out f32 --use-chess 0\n```\n\n兩個 `cd` 區塊都以本研究根目錄為起點，不能直接在前一個工作目錄接續貼上。大小寫參數分別描述問題與 tile；改變任一數值都需重新檢查整除、搬移排列及輸出布局，不能只修改 GEMM 的數學形狀。\n\n## 容量與可重現性一起檢查\n\n[核心資料記憶體與 stack](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/core_data_memory.md#L9-L153) 明確將 stack、ObjectFifo 的 L1 buffers 以及 `.data/.rodata/.bss` 放在同一個小型資料 SRAM 預算中。雙緩衝會增加物件儲存，常數表與外部核心呼叫也會消耗空間；總剩餘量夠大，不代表存在連結所需的連續區域。\n\n[IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 提供 `as_mlir()`、`compile()` 與呼叫三個觀察層級。應先保存生成參數與 MLIR，再檢查放置、buffer address、stack 需求，最後才做實際 runtime 驗證。由既有 xclbin／指令流建立 `NPUKernel` 會繞過 JIT 的 tensor-size metadata 檢查，作者須自行保證參數形狀與型別。這正是 IRON「可控制」同時意味「需明確負責」的地方。\n\n## 用小型資料流檢查設計推理\n\n在擴張核心數以前，可先用紙上追蹤表檢查單輸入、單輸出的資料流：第零個輸入物件何時可取得，對應哪個輸出物件，何時 release，以及哪個 drain 證明該批資料完成。這是來源語意導出的設計練習，不是本次執行測試。若每次核心迴圈處理一個物件，主機卻只送出不足的物件數，最後的等待就可能永遠缺資料；若主機送更多，則要釐清額外物件是否仍在佇列中。\n\n接著加入第二個 consumer，分別追蹤兩者的取得與交還，而不要把廣播想成兩份彼此無關的拷貝。深度只能改變可暫存的物件數，不能修復漏掉 release、錯誤的消費比率或互相等待的循環。若引入滑動視窗，還應明列保留的舊物件和新取得物件，讓下一次呼叫的索引具有可檢查的意義。\n\n最後再估算每個 tile 的同時存活資料，而不是把全程所有陣列相加。輸入、輸出、雙緩衝、暫存與 stack 哪些重疊，會影響可行性；把兩個階段融合可能減少跨 tile 搬移，也可能延長中間值的生命週期。這些取捨需要結合生成後的地址與實際工作負載驗證，不能只從 Python 行數變少判斷優化是否成功。", 
+    "sources": [
+      {
+        "label": "IRON 結構元件",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-1/README.md",
+        "note": "Worker、Program、range_ 與 placement。"
+      },
+      {
+        "label": "ObjectFifo 語意",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2a/README.md",
+        "note": "depth、單一 producer、多 consumer、acquire / release。"
+      },
+      {
+        "label": "IRON Runtime tasks",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2d/RuntimeTasks.md",
+        "note": "fill / drain、TaskGroup、完成依賴與資源回收。"
+      },
+      {
+        "label": "IRON vector_scalar_add 範例",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_examples/basic/vector_scalar_add/vector_scalar_add.py",
+        "note": "查核 CLI 與 JIT generator；命令未執行。"
+      },
+      {
+        "label": "IRON whole_array 矩陣乘法",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_examples/basic/matrix_multiplication/whole_array/whole_array.py#L442-L524",
+        "note": "查核 npu2、8 欄、BF16 / f32 與 Peano 參數。"
+      },
+      {
+        "label": "核心資料記憶體與 stack",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/core_data_memory.md#L9-L153",
+        "note": "stack、FIFO buffer、靜態資料共用 SRAM；需連續空間。"
+      },
+      {
+        "label": "IRON 編譯階段與產物",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md",
+        "note": "JIT、recipe / artifact hash、核心 ELF 與預設 XRT 載入。"
+      }
+    ],
+    "related": [
+      "compiler",
+      "dma",
+      "synchronization",
+      "memory",
+      "runtime",
+      "gemm"
+    ]
+  },
+  {
+    "slug": "triton",
+    "title": "Triton-XDNA：算子、Transform 與支援證據",
+    "summary": "拆解 Linalg／AIR 映射、補齊與快取，說明 dashboard 勾選、數值測試與模型覆蓋為何不能互相代替。",
+    "category": "程式設計",
+    "tags": [
+      "Triton",
+      "Transform dialect",
+      "Linalg",
+      "測試證據"
+    ],
+    "status": "來源查核",
+    "body": "## 實驗性前端的真正範圍\n\n[Triton-XDNA：編譯與 runtime](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/README.md) 把 Triton-XDNA 定義為實驗性、由編譯器產生 XDNA kernel 的專案。它先經 triton-shared 形成 Linalg 計算，再利用 Transform dialect 選定分塊、bufferization 與向量化，接往 AIR／AIE。寫成 `@triton.jit` 不代表既有 GPU kernel 不經調整即可映射到空間陣列；記憶體階層、靜態形狀與 DMA 排列仍需可降階的設計。\n\n同一個 Triton 語法在 GPU 與 NPU 的 dispatch 語意也不能混同。GPU 的 `cuda` 名稱在 ROCm PyTorch 中是 API 裝置命名，不表示 NVIDIA 硬體；NPU 則需要明確的 NPUDriver 與其產物、參數橋接。工具名稱相同，並不消除後端 ABI 差異。\n\n## Dashboard 勾選不是測試結果\n\n[Dashboard 勾選產生邏輯](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/generate_readme.py#L187-L239) 的 `get_device_support()` 只檢查 `transform_aie2.mlir` 與 `transform_aie2p.mlir` 是否存在，接著把布林值顯示成勾號。因此勾選可以精確讀作「這個目錄有對應架構的映射檔」，不能改寫成所有尺寸、型別或硬體均已通過。\n\n| 所見證據 | 可以說 | 不可以說 |\n|---|---|---|\n| transform 檔存在 | 有可閱讀的映射配方 | 硬體測試通過 |\n| 編譯產物存在 | 某次編譯產生了檔案 | 本次輸入真的 dispatch |\n| assertion 測試程式存在 | 上游定義了數值比較 | 本機已執行並通過 |\n| 已執行且附來源的測試紀錄 | 該配置在該環境符合門檻 | 完整 LLM／所有形狀皆支援 |\n\n本頁停在來源查核層級。README 的矩陣乘法對照成績也是特定測試集合的上游敘述，不能提升成普遍 SOTA 或完整模型加速保證。\n\n## 從配方看記憶體與平行度\n\n[AIE2P matmul Transform IR](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/matmul_bf16_m64_n64_k64/transform_aie2p.mlir) 先切 L3 至 L2 的 copy，再將輸出提升到 L2、打包矩陣，接著對 K reduction 分塊，最後建立多核心 herd。配方將 `memory_space = 1` 用於 L2，`memory_space = 2` 用於 L1；這是該流程的 IR 標記，不能視為所有 runtime 中通用的記憶體枚舉。\n\n其核心片段如下，省略相依 handle 定義，僅供閱讀：\n\n```mlir\n%packed = transform.structured.pack %matmul_to_pack packed_sizes = [8, 8, 8]\n  : (!transform.any_op) -> (!transform.any_op)\ntransform.annotate %outer_for_loop \"k_reduction_loop\" : !transform.any_op\n```\n\n打包與轉置決定 A、B 如何送進內核，K 迴圈決定累加跨多少個資料塊。外層分塊不等於硬體 matrix primitive 的微形狀；某個 API 呼叫亦可能降為多個指令。應把 [GEMM](gemm.html) 的運算量、工作集、DMA 流量分開列出，才能解釋為何相同算術有不同執行成本。\n\n## 路徑已查核的示例\n\n以下以研究根目錄為起點；是來源核對後的命令範例，未執行，且需另行準備版本相符的編譯與執行環境：\n\n```bash\ncd sources/Triton-XDNA/examples/matmul_bf16_m64_n64_k64\nAIR_TRANSFORM_TILING_SCRIPT=transform_aie2p.mlir \\\n  python matmul_bf16_m64_n64_k64.py\n```\n\n[Triton BF16 matmul 範例](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/matmul_bf16_m64_n64_k64/matmul_bf16_m64_n64_k64.py) 會掃描多組 M、N、K，不是目錄名稱所暗示的一次六十四階小測試。其 BF16 結果以 `atol=1e1, rtol=1e-1` 比較參考值；這是該範例容差，不適合直接當作所有神經網路的品質門檻。改為 AIE2 的 transform 也不是替 XDNA2「換個最佳化開關」，而是換目標架構。\n\n## 補齊與快取不會憑空消失\n\n[Qwen linear wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/matmul.py) 的 Qwen NPU linear 將 M、N 補到二百五十六的倍數，K 補成二的冪；Triton 程式一次描述完整 K，實際 K 分塊由 Transform 放到裝置端，而非主機逐塊 dispatch。輸入採 BF16，輸出緩衝為 f32，最後再裁回真實尺寸。這可減少主機 K 迴圈，但 decode 的真實 M 為一時，補齊浪費仍然存在。\n\n[Qwen CachedNPUKernel](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/backend_utils.py) 首次呼叫走 JIT，後續以 grid 與 keyword constexpr 建立的 key 找到已編譯 launcher。它並不是完整張量語意雜湊；移植時須核對實際被專門化的尺寸是否都由 key 區分。修改形狀、stride 或映射後不能憑「有快取」就假定重用安全，亦不能把註解內單次 dispatch 數字當成本機量測。\n\n## 覆蓋宣稱必須回到呼叫圖\n\n[Qwen softmax wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/softmax.py) 確實定義 NPU softmax，包含四列一組及最少一百二十八欄的補齊策略；但 [Qwen 注意力與 forward 路由](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977) 的 Qwen `npu` 注意力核心呼叫的是 CPU `torch.softmax`。算子存在，不表示模型用到它。檔案註解中較小 buffer 的 timeout，也是該範例路徑的觀察，不能擴張為所有 DMA 的通用最小長度規格。\n\n相同原則適用 fallback：模型 helper 捕捉例外後改用 PyTorch，代表維持功能的備援，不等於 NPU 執行成功。完整判讀須同時看 backend、實際分支、呼叫紀錄、數值與搬移；[Qwen 案例](qwen-case.html) 進一步整理文件矛盾與裝置路由。依賴版本則以 [Triton 的 AIR 版本鎖](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/mlir-air-hash.txt)、[Triton 的 Peano 版本鎖](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/peano-requirements.txt) 為準，不建議為追逐某段上游成績而改動本機 ROCm。\n\n## 移植算子時的最小檢查表\n\n移植應先固定數學定義，再處理裝置映射。對矩陣乘法，列出輸入的行列主序、轉置、stride、累加初值及輸出裁切；對 reduction，列出歸約軸、真實長度、補齊值與空列處理。補零適合某些線性運算，卻不可以不加思索地套到 softmax，因為新增的零分數會參與指數和，改變有效元素的機率。這是數學與原始碼策略的交叉檢查，不是對硬體指令的額外宣稱。\n\n接著把代表性形狀分成整除、尾端不足、單列、長歸約及多個批次，逐一檢查 wrapper 有沒有遮罩或配置足夠儲存。不能把某個 block 的無遮罩載入直接搬到另一個 wrapper，仍假設尾端會自動補齊。若結果比對只含正數，也可能漏掉符號延伸或飽和規則的差異，因此整數與浮點測試輸入需分別設計。\n\n最後記錄「原 kernel、所選 Transform、實際生成圖」三者的對應關係。當配方匹配的是某一種 Linalg 結構，前端重排或融合後即使數學等價，也可能不再符合原先的 handle 匹配。遇到這種情況，應保留失敗的中間 IR 並確認第一個不符合預期的操作，不要直接把問題歸因於整種資料型別不受支援。", 
+    "sources": [
+      {
+        "label": "Triton-XDNA：編譯與 runtime",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/README.md",
+        "note": "固定快照的流程、依賴與 runtime 條件；不是本機驗證。"
+      },
+      {
+        "label": "Dashboard 勾選產生邏輯",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/generate_readme.py#L187-L239",
+        "note": "exists() 檢查 transform 檔案，不執行 NPU 測試。"
+      },
+      {
+        "label": "AIE2P matmul Transform IR",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/matmul_bf16_m64_n64_k64/transform_aie2p.mlir",
+        "note": "pack、K reduction、memory space 與 herd mapping。"
+      },
+      {
+        "label": "Triton BF16 matmul 範例",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/matmul_bf16_m64_n64_k64/matmul_bf16_m64_n64_k64.py",
+        "note": "尺寸掃描與 torch assert_close；測試存在不表示本次通過。"
+      },
+      {
+        "label": "Qwen linear wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/matmul.py",
+        "note": "NPU M/N 補齊 256、full-K launch、BF16 入 f32 出；GPU 權重快取。"
+      },
+      {
+        "label": "Qwen CachedNPUKernel",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/backend_utils.py",
+        "note": "首次 JIT、後續直接 launcher；快取 key 是 grid 與 keyword constexpr。"
+      },
+      {
+        "label": "Qwen softmax wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/softmax.py",
+        "note": "四列 chunk、最小補齊 128 欄；主模型 attention 未走此 NPU wrapper。"
+      },
+      {
+        "label": "Qwen 注意力與 forward 路由",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977",
+        "note": "npu 注意力核心 CPU；hetero-fast 按 S==1 切換。"
+      },
+      {
+        "label": "Triton 的 AIR 版本鎖",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/mlir-air-hash.txt",
+        "note": "指定 AIR 6746658；不能拿獨立下載的 AIR HEAD 代替。"
+      },
+      {
+        "label": "Triton 的 Peano 版本鎖",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/peano-requirements.txt",
+        "note": "指定 wheel 版本；註解記載混版曾使 stack 問題表現成 NaN。"
+      }
+    ],
+    "related": [
+      "compiler",
+      "gemm",
+      "datatypes",
+      "runtime",
+      "qwen-case",
+      "debug"
+    ]
+  },
+  {
+    "slug": "runtime",
+    "title": "執行期與共享緩衝：格式、ABI、可見性",
+    "summary": "比較 XRT、IRON HRX 與 HSA，並以零拷貝範例解釋映射、同步、生命週期和 dispatch 證據。",
+    "category": "程式設計",
+    "tags": [
+      "XRT",
+      "HSA",
+      "HRX",
+      "ABI",
+      "零拷貝"
+    ],
+    "status": "來源查核",
+    "body": "## Runtime 接受的是契約，不只是檔案\n\n主機 runtime 必須知道載入何種產物、如何解讀指令流、引數的順序與大小，以及哪個緩衝對裝置可見。共享 DRAM 只描述物理記憶體背景，不保證 CPU、GPU、NPU 的虛擬位址、allocator、handle 或同步協定互通。把 PyTorch tensor 的數字指標直接塞進另一個 runtime，並沒有完成映射與權限設定。\n\n[IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 說明 IRON JIT 可從 runtime_sequence metadata 檢查 tensor 大小；直接建立 `NPUKernel` 載入外部產物則沒有同樣的配方與檢查。即使檔案能載入，作者仍要核對形狀、dtype、引數位置及讀寫方向。副檔名不是完整 ABI，必須連生成工具與 host 呼叫一起保存。\n\n## 三種後端，兩套選擇變數\n\n| 使用流程 | 選擇方式 | 本快照主要載入物 |\n|---|---|---|\n| IRON XRT | `NPU_RUNTIME=xrt` | xclbin 與 insts.bin |\n| IRON HRX | `NPU_RUNTIME=hrx` | 相同 xclbin 與 insts.bin |\n| IRON HSA | `NPU_RUNTIME=hsa` | PDI 與 insts.bin |\n| Triton XRT | `NPUDriver(\"xrt\")` | npu2 預設 ELF，npu1 預設 xclbin |\n| Triton HSA | `NPUDriver(\"hsa\")` | PDI 與 insts.bin |\n\n此表交叉依據 [IRON HRX runtime](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hrx_runtime.md)、[IRON HSA runtime](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hsa_runtime.md)、[Triton runtime 與格式選擇](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/amd_triton_npu/backend/driver.py#L1093-L1133)。Triton 裸 `NPUDriver()` 另讀 `AMD_TRITON_NPU_RUNTIME`，不要與 IRON 的 `NPU_RUNTIME` 混用。IRON 文件的「PDI 不是 standalone run input」描述預設 XRT 路徑；不能用它否定另一份文件明確實作的 HSA PDI consumer。逐核心 ELF、指令 ELF、完整裝置 ELF 也需區分。\n\n## HSA 不是任何 ROCm 都有的能力\n\n[IRON HSA runtime](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hsa_runtime.md) 要求 ROCR 具有 AIE agent 與 AIE dispatch packet 支援，且依賴 amdxdna 核心驅動；無 XRT userspace 不等於無驅動。[Triton-XDNA：編譯與 runtime](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/README.md) 還要求 AIE extension header 和相符的 `libhsa-runtime64`，並記載與 ROCm PyTorch 共存時，先載入的同名函式庫可能壓過後續 rpath 搜尋。\n\n這些是環境條件，不是本機能力宣告。本頁未偵測、未安裝、未替換 ROCm，也不建議照搬 nightly 安裝或 preload 命令。將來實驗應在受控環境記錄實際載入的函式庫、AIE agent、標頭與編譯器版本。路徑找得到只能證明 discovery，不能證明 ABI 完整或 dispatch 已成功。\n\n## 零拷貝要同時證明三件事\n\n[共享緩衝測試來源](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/shared_buffer_test.py) 測試 NPU 擁有頁面而 HIP 映射，以及 HIP 擁有頁面而 NPU 映射的兩個方向。buffer 指定一種 NPU runtime，不能同時要求 XRT 與 HSA 映射彼此的頁面；同一程序使用兩種 runtime 的不同 buffers，是另一回事。HSA 下，HIP 配置時還必須先說明要分享給 NPU，普通 pinned allocation 不能事後任意升級。\n\n工程上應把條件拆為：一、映射與權限讓 consumer 能存取；二、producer 的寫入已完成且可見；三、直到所有 consumer 結束前都保留儲存與相關 handle。DLPack 能描述某個 tensor view，不會自動把任意配置變成 NPU 可用緩衝。關閉物件與釋放記憶體也不總是同一件事，因為 pool 可能保留頁面供重用。\n\n## 等待、可見性與生命週期\n\n[零拷貝分階段基準](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/zero_copy_benchmark.py) 的 shared 路徑讓 GPU `torch.matmul(..., out=...)` 直接寫入共享頁面，仍保留 GPU stream synchronize，之後才讓 NPU 讀取。零拷貝減少的是 staging，不是資料依賴。若移除 fence，只因測量程式前一步恰好同步而「看來正確」，移植到其他排程便可能讀到未完成內容。\n\nIRON HRX 文件明列 host-mapped buffer 的 flush／invalidate，以及 chain 內 execution 加 memory barrier；IRON HSA 則使用 in-order queue 和 system-scope acquire／release fences，並記載其 ROCR doorbell 在該實作中阻塞至完成。兩者的單一程序 dispatch 都要求序列化呼叫。這些條件不能泛化為每個 HSA 實作皆同步，也不能因某個 sync hook 是空操作就推論沒有順序需求。\n\n[共享緩衝測試來源](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/shared_buffer_test.py) 另檢查逃逸的 torch、NumPy、DLPack view 與 pool 重用。應讓所有 view 和執行中的工作有明確生命週期；避免把已關閉 buffer 的裸指標留下，等待另一個配置重用相同頁面。\n\n## 如何公平閱讀零拷貝結果\n\n[零拷貝分階段基準](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/zero_copy_benchmark.py) 在同一 runtime 內比較 copy 與 shared，分列 GPU 計算、handoff、NPU dispatch 與回傳。跨 runtime 時，XRT 把兩個 add 接成一次 multi-launch ELF，HSA 則提交兩次；XRT 又可宣告固定 addends，HSA 普通 ABI 不具有相同靜態引數提示。因此總時間差不是純粹的記憶體拷貝差。\n\n[零拷貝共用 add chain](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/common/add_chain.py) 提供相同 f32 add 核心與配方，讓算術可對照，但不消除提交方式差異。HSA 測試以 `hsa_dispatch_counts()` 的差值確認三個運算元 in-place、零個 staged；數值相同本身不足以排除 staging。這些測試在本次僅閱讀，沒有執行；退出碼七十七代表環境不具備而跳過，不可記為通過。延伸比較應參考 [異質推論](heterogeneous.html) 與 [效能](performance.html)，而不是從共享記憶體名稱直接推算加速比。\n\n## 將共享緩衝契約寫進介面\n\n對需要跨裝置交接的函式，文件應明列誰配置、誰寫入、誰等待、誰回收，並說明回傳的是值的拷貝，還是仍依附原始儲存的 view。若回傳的是 view，呼叫端就不能只保留 tensor 的形狀資訊，而把其背後資源視為可立即重用。緩衝池雖可攤薄映射成本，也會讓「同一數字地址再次出現」失去診斷意義；地址相同不證明同一次配置仍然有效。\n\n主機可見性和跨裝置完成順序也應分開寫。例如 producer 的非同步工作尚未結束時，consumer 即使具有合法映射仍可能讀到舊資料；反過來，已等待 producer 完成，也不代表 consumer 使用的是同一批實體頁面。測試需要把相同頁面、完成事件與正確結果串成證據鏈，而不是只檢查其中一項。\n\n錯誤處理也要遵守相同契約：如果提交失敗，不可在未釐清仍在執行的工作之前，把相關緩衝交給下一個請求；如果只完成部分 chain，則不能把最後輸出標為有效。這些是一般工程約束，實際可用的取消、等待與釋放 API 仍須由所選 runtime 的固定版本查證。本文刻意不提供跨 runtime 通用的裸指標互傳技巧，因為那會跳過最重要的安全條件。", 
+    "sources": [
+      {
+        "label": "IRON 編譯階段與產物",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md",
+        "note": "JIT、recipe / artifact hash、核心 ELF 與預設 XRT 載入。"
+      },
+      {
+        "label": "IRON HRX runtime",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hrx_runtime.md",
+        "note": "libhrx / amdxdna HAL、xclbin + insts、flush / invalidate。"
+      },
+      {
+        "label": "IRON HSA runtime",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hsa_runtime.md",
+        "note": "PDI + insts、AIE ROCR、queue fences、同步與限制。"
+      },
+      {
+        "label": "Triton runtime 與格式選擇",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/amd_triton_npu/backend/driver.py#L1093-L1133",
+        "note": "HSA 強制 PDI；XRT 自動選 npu2 ELF、npu1 xclbin。"
+      },
+      {
+        "label": "Triton-XDNA：編譯與 runtime",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/README.md",
+        "note": "固定快照的流程、依賴與 runtime 條件；不是本機驗證。"
+      },
+      {
+        "label": "共享緩衝測試來源",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/shared_buffer_test.py",
+        "note": "雙向 mapping、DLPack、pool lifetime、in-place / staged 計數與 skip。"
+      },
+      {
+        "label": "零拷貝分階段基準",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/zero_copy_benchmark.py",
+        "note": "同 runtime 內比較 copy / shared；跨 runtime dispatch 次數不同。"
+      },
+      {
+        "label": "零拷貝共用 add chain",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/common/add_chain.py",
+        "note": "兩個 f32 adds；單 op chain 重複呼叫問題僅為上游註解記載。"
+      }
+    ],
+    "related": [
+      "compiler",
+      "memory",
+      "synchronization",
+      "heterogeneous",
+      "performance",
+      "debug"
+    ]
+  },
+  {
+    "slug": "llm-graph",
+    "title": "LLM 計算圖：算子、狀態與裝置邊界",
+    "summary": "以 Qwen2.5 原始碼分解 Transformer 圖，追蹤 KV cache、補齊、精度與融合，區分算子存在和實際模型路由。",
+    "category": "LLM推論",
+    "tags": [
+      "Transformer",
+      "計算圖",
+      "KV cache",
+      "算子融合"
+    ],
+    "status": "來源查核",
+    "body": "## 計算圖不只是 GEMM 清單\n\nLLM 的數學圖包含正規化、投影、位置編碼、注意力、殘差、非線性和輸出頭；執行圖還包含型別轉換、補齊、主機搬移、快取寫入、分配與等待。[Qwen2Model 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py) 的 forward 與 generate 把這兩層放在同一份程式，適合用來查核，但不能把模型名稱等同於某個固定硬體部署。\n\n閱讀時應為每條邊標記真實形狀、實際儲存形狀、dtype、所在裝置，以及誰最後寫入。權重在 CPU 保存不表示矩陣乘法一定在 CPU：NPU wrapper 可以暫存並 dispatch；反過來，backend 名字含 NPU 也不表示所有 PyTorch 工作都移到裝置。此處以固定 Qwen 範例說明方法，而非宣稱所有模型都採相同圖。\n\n## 一個 Decoder block 的資料路徑\n\n設輸入為 `(B,S,D)`，MLP 中間寬度為 H。以下是 [Qwen2Model 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py) 的數學流程摘要，不是可執行 Python：\n\n```text\nx1 = x + O(Attention(RoPE(Q(Norm(x))), RoPE(K(Norm(x))), V(Norm(x))))\nx2 = x1 + Down(SiLU(Gate(Norm(x1))) * Up(Norm(x1)))\nlogits = FinalNorm(x_last) @ EmbeddingWeight^T\n```\n\n| 階段 | 主要資料／運算 | 查核焦點 |\n|---|---|---|\n| RMSNorm | 每列平方和、倒平方根與 gamma | reduction 真實寬度、精度 |\n| QKV 投影 | 同一輸入的線性變換 | 合併權重、bias、KV head 數 |\n| 注意力核心 | 分數、遮罩、softmax、乘 V | causal offset、暫存量、裝置 |\n| MLP | gate／up 分支再匯合 | 中間張量、SwiGLU 與 down |\n| 殘差、輸出頭 | 逐元素加法、大詞彙矩陣 | 累積誤差與額外 dispatch |\n\n程式把 Q/K/V 權重和 bias 拼成一次投影，再分割 Q 與較窄的 K/V；這是圖層融合，不代表注意力核心也包含在該矩陣 kernel 中。\n\n## GQA 與 KV cache 是持久狀態\n\n[Qwen 注意力與 forward 路由](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977) 先對新 Q/K 套 RoPE，再將 K/V 寫入預先配置 cache 的 `[seq_pos:seq_pos+S]`，更新有效長度。cache 保留較少的 KV heads，送入注意力前卻以 `repeat_interleave` 擴為 query heads。因此「GQA cache 節省容量」與「該 kernel 的工作張量沒有展開」是不同命題。\n\n[Qwen RoPE 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rope.py) 的 cos／sin 依 `pos_offset` 切片，再移至 `q.device`；檔頭說 GPU 並不能取代實際裝置推導。CPU 注意力分支也能使用此函式。未擴張 KV 的理想資料量可寫成 `2×layers×B×T×KV_heads×head_dim×element_bytes`，但這只是由形狀推導的 payload，不含頭展開、allocator、RoPE 表、權重及中間結果。詳見 [KV cache](kv-cache.html)。\n\n## Prefill 和 decode 是不同執行形狀\n\n多 token prefill 可把同一權重攤在較多輸入列上；單 token decode 的 M 很小，卻仍須讀取權重並使用逐漸增長的 KV。[Qwen linear wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/matmul.py) 把獨立 NPU matmul 的 M／N 補齊至二百五十六倍數，K 補成二的冪。以模型中 H 等於四千八百六十四的 down projection 為例，full-K 描述仍會包含補齊的 K，不能拿真實 FLOPs 除以時間就宣稱完全有效利用。\n\n[Qwen 注意力與 forward 路由](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977) 的 `hetero-fast` 不是以使用者叫它「decode」就切換，而是 `S == 1`。單 token prompt 也會符合該條件；因此測試計畫應同時記錄 prompt token 數與每次 forward 的形狀。與其他 backend 對比時，須把 prefill、第一次 decode 與後續步驟分開，而非只報一個含糊的 tokens/s。\n\n## 融合與精度必須一起讀\n\n[Qwen RMSNorm wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rmsnorm.py) 的獨立 NPU RMSNorm 做 bare normalization，再在 CPU 乘 gamma；平方和除以真實欄數，而不是補齊欄數，這是補零後維持數學定義的必要條件。[Qwen SwiGLU wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/swiglu.py) 的獨立 NPU SwiGLU 是 SiLU 與 multiply 兩段，不能與 GPU 單 kernel 直接按「一個算子」計提交成本。[Qwen residual add](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/add.py) 又提供 f32 殘差路徑，避免每層都先把殘差壓回 BF16。\n\n[Qwen2Model 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py) 的 `_FusedMLP` 進一步串接 add、norm、gate／up、SwiGLU、down 與殘差；gamma 可折入權重，鏈中的中間資料也不必每個算子回主機。這是多次裝置工作打包成一條鏈，不是所有運算變成一條機器指令。其 BM 是一百二十八，長輸入超過單塊條件會回到未融合路徑；每層權重不同但共用 chain，亦需分開管理靜態 BO。\n\n## 以實際呼叫圖定義覆蓋率\n\n[Qwen GPU fused attention](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/attention.py) 是 GPU-only fused attention；[Qwen softmax wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/softmax.py) 雖有 NPU softmax wrapper，主模型的 `npu` 注意力核心仍直接使用 CPU matmul／softmax。這是一個重要反例：把目錄中的所有 NPU kernel 名稱打勾，無法證明整張圖已移植。也不能把獨立 norm 的 gamma 乘法、bias 或主機裁切成本從圖中抹去。\n\n對每個節點，建議建立「預期裝置、實際分支、fallback、搬移、數值門檻」五欄紀錄；對每條狀態邊，另記 producer 完成與 consumer 可見的時點。再以相同模型、輸入與精度設定比較 [異質推論](heterogeneous.html)。這是工程推導的驗證方法，本頁沒有模型下載、NPU 執行或實測吞吐；具體分支與 README 矛盾則集中於 [Qwen 案例](qwen-case.html)。\n\n## 圖切分的成本要沿邊計算\n\n假設把某個線性層從 GPU 移到 NPU，不能只替換該節點的計算時間。必須追蹤輸入是否已在 NPU 可見緩衝、權重是否需要重排與 staging、輸出是否需要裁切、後繼正規化或殘差在哪個裝置，以及跨界後是否增加等待。若搬移的是逐層激活而不是固定權重，費用還會隨生成步驟反覆出現。這是圖層成本模型的必要項，不是本頁預測的毫秒數。\n\n融合的評估也應沿相同方法進行。消除中間結果回主機，可能減少拷貝與提交；但若融合使同時存活的暫存更多，或限制可支援的列數，就可能需要額外補齊或另一條長序列路徑。只用「融合算子數」當成優化指標，無法反映這些條件。應保留未融合版本作數學與資料流對照，並為不同形狀記錄實際選中的分支。\n\n對有狀態的生成，更應檢查 cache 是否在每一步只寫入新增位置、有效長度是否正確更新，以及位置偏移是否與遮罩一致。單次 prefill 的 logits 相近，只驗證了其中一部分圖；連續多步之後的錯位，可能直到較長上下文才顯現。將狀態邊納入測試，是從算子展示走向完整推論系統所不能省略的工作。", 
+    "sources": [
+      {
+        "label": "Qwen2Model 實作",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py",
+        "note": "模型形狀、配置、fused chain、KV cache 與主機搬移。"
+      },
+      {
+        "label": "Qwen 注意力與 forward 路由",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977",
+        "note": "npu 注意力核心 CPU；hetero-fast 按 S==1 切換。"
+      },
+      {
+        "label": "Qwen RoPE 實作",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rope.py",
+        "note": "apply_rope 依 q.device 放置 cos/sin；檔頭 GPU 敘述已過時。"
+      },
+      {
+        "label": "Qwen linear wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/matmul.py",
+        "note": "NPU M/N 補齊 256、full-K launch、BF16 入 f32 出；GPU 權重快取。"
+      },
+      {
+        "label": "Qwen RMSNorm wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rmsnorm.py",
+        "note": "bare NPU norm 使用真實欄數；獨立 gamma 乘法在 CPU。"
+      },
+      {
+        "label": "Qwen SwiGLU wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/swiglu.py",
+        "note": "獨立 NPU SiLU + multiply 兩段；與 fused chain 不同。"
+      },
+      {
+        "label": "Qwen residual add",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/add.py",
+        "note": "NPU f32 路徑與補齊；GPU wrapper 搬移 CPU 輸入。"
+      },
+      {
+        "label": "Qwen GPU fused attention",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/attention.py",
+        "note": "online softmax 與 BF16 dot；wrapper 固定 cuda。"
+      },
+      {
+        "label": "Qwen softmax wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/softmax.py",
+        "note": "四列 chunk、最小補齊 128 欄；主模型 attention 未走此 NPU wrapper。"
+      }
+    ],
+    "related": [
+      "qwen-case",
+      "attention",
+      "kv-cache",
+      "prefill-decode",
+      "heterogeneous",
+      "quantization"
+    ]
+  },
+  {
+    "slug": "qwen-case",
+    "title": "Qwen2.5 案例：CPU＋NPU、GPU 與異質路由",
+    "summary": "以固定 model.py 裁決 README 舊段落，逐項追蹤注意力、LM head、fused MLP、fallback 與計時邊界。",
+    "category": "LLM推論",
+    "tags": [
+      "Qwen2.5",
+      "裝置路由",
+      "fallback",
+      "異質推論"
+    ],
+    "status": "來源查核",
+    "body": "## 先固定來源，再裁決文件矛盾\n\n本機 Triton-XDNA HEAD 已核對為 `5c33df1263f29de30f71616780c2e8a88e623782`。[Qwen2.5 README](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/README.md) 前段及路由表寫明 `npu` 是 CPU＋NPU、`hetero-fast` 的 decode 是 GPU，後方卻殘留把注意力與 LM head 概括為 always iGPU 的舊段落。本頁不複製該句，而以 [Qwen 注意力與 forward 路由](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977) 和 [Qwen final norm / LM head](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L1106-L1144) 的條件分支為準；沒有再次開 live 網頁或宣稱已比較遠端 HEAD。\n\n同樣要警覺程式註解：初始化附近仍說 npu 的 LM head 在 NPU，但 forward 實作明確用 CPU torch matmul。可執行分支的證據優先於說明文字，且本次只是靜態查核，不是模型推論結果。\n\n## 路由表應讀作預期主算子位置\n\n| 工作 | gpu | npu | hetero | hetero-fast 的 S=1 |\n|---|---|---|---|---|\n| input／final norm | GPU | NPU bare norm＋CPU gamma | NPU／主機輔助 | GPU |\n| QKV 與 O 投影 | GPU | NPU | GPU | GPU |\n| RoPE、分數、softmax、乘 V | GPU | CPU | GPU | GPU |\n| MLP 與殘差主算子 | GPU | NPU | NPU | GPU |\n| LM head | GPU | CPU | GPU | GPU |\n\n表依 [Qwen2Model 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py)、[Qwen RMSNorm wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rmsnorm.py)；融合時 gamma 處理會改變。`hetero-fast` 的 S 大於一走 hetero 分支，`hetero` 不會因 decode 自動全換 GPU。`reference` 是另外的 HuggingFace 路徑，不列入四種 Triton 路由比較。GPU 列也不能解讀成整個 Python 程序沒有 CPU 工作或拷貝。\n\n## 注意力核心與主機工作不能藏起來\n\n`_attention()` 在 npu 模式把 QKV／O 的 backend 設為 npu，取得 CPU 可見的投影結果，RoPE 隨 tensor 裝置執行，分數與 softmax 用 CPU f32。[Qwen RoPE 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rope.py) 的實作依 `q.device` 放置表格，故檔頭 GPU 敘述已不適用所有 backend。GPU／hetero 則呼叫 [Qwen GPU fused attention](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/attention.py) 的 fused attention；先把 GQA 的 KV heads 展開，不表示已有原生 GQA NPU attention。\n\n另外，model.py 的一般 gpu／npu 共用分支會無條件 `_to_cpu(attn_out)`，再由 [Qwen residual add](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/add.py) 的 GPU wrapper 將 CPU operand 搬回 GPU。這是 fullGPU 標籤仍可能含主機往返的靜態證據，不能稱為零搬移 GPU baseline；此處未實測其代價。hetero 分支也明列 `_to_gpu`／`_to_cpu`，所以共享 DRAM 不代表模型自動使用 zero_copy 範例。\n\n## 融合預設值與 fallback 的邊界\n\n[Qwen2Model 實作](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py) 的環境讀取是 `AMD_TRITON_NPU_FUSED_MLP` 預設字串 `\"1\"`，即使旁邊註解寫 opt-in，本快照符合 npu／hetero 條件時預設會建立鏈。BM 為一百二十八，真實 `B×S` 超過此值走未融合分支；不是 README 所述所有情況都使用獨立二百五十六列 block。\n\n[Qwen linear wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/matmul.py) 的獨立 linear 是 BF16 輸入、full-K 一次 launch、f32 輸出；[Qwen RMSNorm wrapper](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rmsnorm.py) 的 bare norm 回來再乘 gamma。融合鏈則串接殘差、正規化、MLP 並折入 gamma，故不能把每個名稱視為一個獨立 dispatch。\n\n[Qwen helper 例外與 fallback](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L732-L824) 的 linear、norm、SwiGLU、add、softmax helper 捕捉例外後記錄 warning 並以 PyTorch 備援。檔案層級 kernel wrappers 不都自帶 try／except；fused chain 的 `run()` 與直接 fused attention 呼叫也沒有同樣保護。fallback 的裝置取決於當下 tensor，可能仍失敗，不能宣稱所有編譯錯誤都會安全退回 CPU。成功產生文字更不能證明 NPU 主算子真的執行。\n\n## 驗證與計時不是同一條 CLI 路徑\n\n[Qwen CLI 與正確性閘門](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/qwen_inference.py#L349-L443) 預設 `--backend npu --max-tokens 0`，單次 forward 會比較 logits，僅以 cosine 不低於零點九五作為退出閘門，不要求 top-1 一致。最大／平均誤差與 top-k 另行印出，這不等於 token 完全一致、任務品質相同或所有值有限的完整證明。生成路徑主要輸出文字及計時，不具備同樣的錯誤輸出 assertion。\n\n以下參數已查核，但未執行；若執行會載入模型並可能下載權重，本次不做：\n\n```bash\ncd sources/Triton-XDNA/examples/qwen2_5\npython qwen_inference.py --model qwen2.5-0.5b \\\n  --backend npu --max-tokens 0 --profile\n```\n\n[Qwen 生成計時呈現](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/qwen_inference.py#L167-L241) 把 prefill forward 時間稱為 TTFT，decode 平均稱 TPOT；總 TPS 包含 prefill，steady TPOT 另排除第一次 decode。模型載入、tokenization 和 cache 配置不全在這個 TTFT 內；首次 JIT 與暖機狀態也須另記。不能用 hetero-fast 的 GPU decode TPOT 當成 NPU decode 成績，再與 CPU＋NPU 的端到端平均直接比較。\n\n## 可成立的結論與待驗證事項\n\n來源支持的是：此範例具備 CPU＋NPU 路徑、GPU 路徑與按形狀切換的異質策略，並有可讀的 KV cache、補齊、融合及容錯實作。不支持的是：全模型純 NPU、任意 prompt 品質無損、所有 fallback 都被統計、或任何模式普遍最快。\n\n重現報告應列模型尺寸、prompt 長度、精度、融合開關、每階段 backend、warning、實際 dispatch 與拷貝，再附 logits／token 檢查。本頁沒有下載模型、變更 ROCm 或執行 NPU；註解內的毫秒或每 token 數字只能標為上游背景敘述。與 [驗證方法](validation.html) 及 [效能比較](performance.html) 合讀，才能避免把功能跑通當成加速證明。\n\n## 案例重現紀錄的具體欄位\n\n以五億與十五億參數版本比較時，應保存設定表中的層數、隱藏寬度、注意力頭與中間寬度，而不是只記權重檔名。相同 kernel 程式服務多種模型，仍可能因補齊後的尺寸不同而產生不同產物和記憶體成本；中間寬度增大也會放大 gate／up 暫存與 down projection 的歸約長度。這些是來源形狀導出的差異，本文不從參數數量直接推算速度。\n\n每次實驗再分成冷啟動與重用兩組，明列哪些時間包含權重放置、編譯、硬體 context 建立，以及首次特定形狀的 dispatch。若只報穩態，應同時交代排除哪些樣本；若包含首次開銷，就不要把結果稱為純核心吞吐。尤其不同 prompt 長度可能落在融合條件的兩側，或讓首次 decode 產生另一套快取，必須把這些條件放在表格中才有可比性。\n\n數值欄位則分別保留 logits 的有限值檢查、最大與平均誤差、餘弦相似度、下一 token 及後續生成差異。不同精度路徑可能在接近的候選分數間翻轉首選 token，不能把所有差異都當成程式錯誤，也不能因餘弦過關就忽略任務品質。只有把容忍的差異事先定義清楚，才能判斷融合、補齊或異質切分是否仍滿足使用目的。\n\n最後另外列出預期 NPU 節點與確實觀察到的 dispatch，不把 CPU 注意力、CPU 輸出頭或例外備援算進 NPU 覆蓋率。若沒有足夠的活動紀錄，應誠實填寫尚未確認，而非用 backend 名稱代替證據。", 
+    "sources": [
+      {
+        "label": "Qwen2.5 README",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/README.md",
+        "note": "路由表已更新但其後仍有 always iGPU 舊段落；採 model.py 分支裁決。"
+      },
+      {
+        "label": "Qwen 注意力與 forward 路由",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L826-L977",
+        "note": "npu 注意力核心 CPU；hetero-fast 按 S==1 切換。"
+      },
+      {
+        "label": "Qwen final norm / LM head",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L1106-L1144",
+        "note": "npu 的 LM head 明確用 CPU torch matmul。"
+      },
+      {
+        "label": "Qwen2Model 實作",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py",
+        "note": "模型形狀、配置、fused chain、KV cache 與主機搬移。"
+      },
+      {
+        "label": "Qwen RMSNorm wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rmsnorm.py",
+        "note": "bare NPU norm 使用真實欄數；獨立 gamma 乘法在 CPU。"
+      },
+      {
+        "label": "Qwen RoPE 實作",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/rope.py",
+        "note": "apply_rope 依 q.device 放置 cos/sin；檔頭 GPU 敘述已過時。"
+      },
+      {
+        "label": "Qwen GPU fused attention",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/attention.py",
+        "note": "online softmax 與 BF16 dot；wrapper 固定 cuda。"
+      },
+      {
+        "label": "Qwen residual add",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/add.py",
+        "note": "NPU f32 路徑與補齊；GPU wrapper 搬移 CPU 輸入。"
+      },
+      {
+        "label": "Qwen linear wrapper",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/kernels/matmul.py",
+        "note": "NPU M/N 補齊 256、full-K launch、BF16 入 f32 出；GPU 權重快取。"
+      },
+      {
+        "label": "Qwen helper 例外與 fallback",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L732-L824",
+        "note": "linear / norm / SwiGLU / add / softmax helper 的 try / except。"
+      },
+      {
+        "label": "Qwen CLI 與正確性閘門",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/qwen_inference.py#L349-L443",
+        "note": "預設 npu / max-tokens=0；cosine 0.95，不要求 top-1；generation 不同。"
+      },
+      {
+        "label": "Qwen 生成計時呈現",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/qwen_inference.py#L167-L241",
+        "note": "TTFT、TPOT、含 prefill TPS 與排除首次 decode 的 steady 統計。"
+      }
+    ],
+    "related": [
+      "llm-graph",
+      "triton",
+      "runtime",
+      "prefill-decode",
+      "validation",
+      "performance"
+    ]
+  },
+  {
+    "slug": "debug",
+    "title": "除錯與證據分級：不要把 fallback 當 NPU 成功",
+    "summary": "建立從生成、編譯、載入、同步到數值的檢查順序，記錄 signedness 舊路徑風險及測試未執行的邊界。",
+    "category": "程式設計",
+    "tags": [
+      "除錯",
+      "驗證",
+      "signedness",
+      "trace"
+    ],
+    "status": "來源查核",
+    "body": "## 先為失敗定位層級\n\n「結果不對」可能源於生成式 Python、Transform 匹配、buffer 配置、核心連結、runtime ABI、資料可見性或數值策略。應先保留第一個失敗訊息與來源快照，不要一開始就更換驅動、清除全部環境或提高容差。[IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 的階段圖提供從配方、MLIR、磁碟產物到 NPUKernel 的檢查順序；每一層成功只表示可以繼續往下查。\n\n| 層級 | 保存的證據 | 不能單憑它宣稱 |\n|---|---|---|\n| 原始碼／配方 | commit、Transform、形狀與 dtype | 硬體支援已驗證 |\n| 編譯 | 完整命令、IR、連結產物 | 已提交 NPU |\n| 執行期 | runtime、ABI、完成／錯誤狀態 | 數學結果正確 |\n| 數值 | 參考值、容差、有限值、邊界輸入 | 未測形狀亦正確 |\n| 效能 | 暖機、同步、階段時間與裝置 | 普遍最快或純 NPU |\n\n本頁命令都只是查核過的示例，沒有執行編譯、模型或 NPU 測試。\n\n## 先看 IR，再看產物與快取\n\n[IRON vector_scalar_add 範例](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_examples/basic/vector_scalar_add/vector_scalar_add.py) 可在指定目標後輸出 MLIR。以下以研究根目錄為起點，未執行：\n\n```bash\ncd sources/mlir-aie\npython3 programming_examples/basic/vector_scalar_add/vector_scalar_add.py \\\n  --dev npu2 --emit-mlir\n```\n\n檢查 `aie.device` 的世代、runtime_sequence 引數、FIFO 深度及 core 位置，能先發現錯誤的假設。[aiecc 產物與建置圖](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/tools/aiecc/README.md#L29-L49) 另提供 `--emit-dot` 顯示建置圖而不編譯，以及 checkpoint／resume 保存失敗邊界；這些是編譯工具功能，不是要求在本次工作重建工具鏈。\n\n[IRON 編譯階段與產物](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md) 說明 recipe 與 artifact freshness 分開判斷，應保存 cache 位置與命中訊息，而不是認為舊產物一定對應新程式。繞過 JIT metadata 的外部產物載入，也須由作者核對 tensor 大小與 dtype。npu2 的 Triton ELF 和 IRON 預設 xclbin／insts 不能按副檔名猜測互通，需對照 [runtime](runtime.html)。\n\n## Timeout 與 NaN 未必是算術指令問題\n\n[核心資料記憶體與 stack](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/core_data_memory.md#L9-L153) 的核心 SRAM 同時容納 stack、FIFO buffers 和靜態資料。stack 太小可能覆寫 buffer；靜態資料則需要連續空間，不能只加總碎片。應讀 linked core 的 measured stack／data 資訊與連結配置；無法測量的外部物件也不能假設需求為零。\n\n[Triton 的 Peano 版本鎖](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/peano-requirements.txt) 註解記載工具鏈混版曾使 stack 問題表現成 NaN，這是版本配對的重要警示，不是本機重現。遇到等待不結束，還要檢查 FIFO acquire／release、輸入及輸出物件數、DMA 邊界與 TaskGroup 回收；[IRON Runtime tasks](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2d/RuntimeTasks.md) 要求未等待的工作必須受已等待工作依賴覆蓋。單純提高 timeout 或刪掉 wait 可能只是掩蓋錯誤。\n\n## 舊式 signedness 路徑列為靜態風險\n\n[AIEVec 舊式直接 matmul lowering](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/lib/Conversion/AIEVecToLLVM/AIEVecToLLVM.cpp#L4849-L5048) 保留的 `aievec.matmul_aie2p` 直接 lowering 中，i8 分支把 signX、signY 放入控制字；i16 的 `8×2×8 → acc32` 分支卻回傳固定 `24`，rewrite 沿用該值。[Peano AIE2P 控制字](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L15-L22) 定義 signX 在 bit 九、signY 在 bit 八，因此這個固定值未帶兩個 signed 位元；相同基本模式的雙 signed 控制字應為 `24 | 512 | 256 = 792`。\n\n這是來源交叉檢查的風險，不是已動態重現的缺陷，更不證明所有 IRON／AIR 路徑都經過這個 legacy conversion。C++ API 有 signed overload，不能替這條 MLIR 路徑背書；也不能反向宣稱硬體沒有 signed i16 乘法。後續獨立驗證宜用負數、正負交錯與相同 bit pattern 的 unsigned 輸入，並核對實際產生的控制字。\n\n即使 signedness 正確，累加寬度也可能溢位。例如兩項 `(-32768)×(-32768)` 相加達到二的三十一次方，超出 signed acc32 正值範圍。數學參考值、模數截斷、飽和與輸出轉型需分開定義，不能只寫「支援 INT16」。\n\n## 排除假陽性：勾選、fallback 與 skip\n\n[Dashboard 勾選產生邏輯](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/generate_readme.py#L187-L239) 的 dashboard 勾號來自 transform 檔存在，並非測試執行。[Qwen helper 例外與 fallback](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L732-L824) 又顯示模型 helper 在 Triton 失敗後可 fallback 到 PyTorch；必須保存 warning 及實際裝置，不能因正常退出便填上「NPU 通過」。融合鏈與 fused attention 並非全部由相同例外處理包住，錯誤也可能直接往外傳。\n\n[Qwen CLI 與正確性閘門](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/qwen_inference.py#L349-L443) 的單次 forward 只用 cosine 零點九五閘門，top-1 不一致不會自動判失敗；generation 路徑又沒有同樣斷言。工程上應另查有限值、逐層差異及 token／任務品質，尤其純粹 `cos_sim < threshold` 不是對 NaN 的完整拒絕條件。\n\n[共享緩衝測試來源](https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/shared_buffer_test.py) 的七十七退出碼表示環境不足而跳過；零拷貝還需看 in-place／staged 計數，值相同無法排除內部拷貝。因此證據表應保留未執行、跳過、失敗、符合門檻四種狀態，不能把它們都折成一個綠勾。\n\n## Trace 是解釋工具，不是萬用保證\n\n[IRON trace 設定](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-4/section-4b/README.md#L17-L120) 以 `Program.enable_trace` 配置選定 Worker、事件路由與主機 trace buffer。觀察 lock stall、stream stall 或向量活動，可用來追問資料流哪個環節受阻，但需匹配 AIE2P 事件定義；不能把另一世代的原始事件編號直接搬入。trace 本身也佔資源，應記錄 buffer 大小與是否截斷。\n\n[IRON HSA runtime](https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hsa_runtime.md) 明列 IRON HSA 尚不支援 trace capture，且單一 queue 需由呼叫者序列化；不能把 XRT 的 trace 教學直接套到 HSA。最終報告應同時附 host 時間、完成同步、數值比較與裝置活動，而不是只截一張有波形的圖。這次僅整理來源與待驗證事項，未產生 NPU trace，也未動到來源、服務或相依套件。\n\n## 讓問題報告能由下一位讀者接手\n\n最小重現紀錄應包含固定來源版本、完整相依版本、目標世代、輸入生成方式、真實與補齊形狀、型別、選定分支、錯誤原文及第一個不符合預期的階段。若只附模型最後輸出的文字，接手者無法判斷是位置偏移、數值累積、fallback 還是同步問題。若只附執行時間，亦無法排除測到的是編譯或主機 staging。\n\n縮小問題時保留原本的資料符號、尾端形狀與等待關係，不要把引發問題的負數全部換成正數，或把非整除尺寸換成漂亮的整數倍後便宣告正常。可將較小輸入的參考結果和每階段中間值保存為獨立證據，並清楚區分哪些來自實際執行、哪些只是原始碼推導。這樣的報告比籠統的「支援／不支援」更能指出下一個驗證步驟。", 
+    "sources": [
+      {
+        "label": "IRON 編譯階段與產物",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/compilation_stages.md",
+        "note": "JIT、recipe / artifact hash、核心 ELF 與預設 XRT 載入。"
+      },
+      {
+        "label": "IRON vector_scalar_add 範例",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_examples/basic/vector_scalar_add/vector_scalar_add.py",
+        "note": "查核 CLI 與 JIT generator；命令未執行。"
+      },
+      {
+        "label": "aiecc 產物與建置圖",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/tools/aiecc/README.md#L29-L49",
+        "note": "xclbin 指令流與 full-ELF 為不同輸出方案。"
+      },
+      {
+        "label": "核心資料記憶體與 stack",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/core_data_memory.md#L9-L153",
+        "note": "stack、FIFO buffer、靜態資料共用 SRAM；需連續空間。"
+      },
+      {
+        "label": "Triton 的 Peano 版本鎖",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/utils/peano-requirements.txt",
+        "note": "指定 wheel 版本；註解記載混版曾使 stack 問題表現成 NaN。"
+      },
+      {
+        "label": "IRON Runtime tasks",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-2/section-2d/RuntimeTasks.md",
+        "note": "fill / drain、TaskGroup、完成依賴與資源回收。"
+      },
+      {
+        "label": "AIEVec 舊式直接 matmul lowering",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/lib/Conversion/AIEVecToLLVM/AIEVecToLLVM.cpp#L4849-L5048",
+        "note": "i16 8×2×8 固定 conf=24 的 signedness 靜態風險；未動態重現。"
+      },
+      {
+        "label": "Peano AIE2P 控制字",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L15-L22",
+        "note": "signX / signY 位於 bit 9 / 8；API 不等於所有 lowering 已驗證。"
+      },
+      {
+        "label": "Dashboard 勾選產生邏輯",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/generate_readme.py#L187-L239",
+        "note": "exists() 檢查 transform 檔案，不執行 NPU 測試。"
+      },
+      {
+        "label": "Qwen helper 例外與 fallback",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/model.py#L732-L824",
+        "note": "linear / norm / SwiGLU / add / softmax helper 的 try / except。"
+      },
+      {
+        "label": "Qwen CLI 與正確性閘門",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/qwen2_5/qwen_inference.py#L349-L443",
+        "note": "預設 npu / max-tokens=0；cosine 0.95，不要求 top-1；generation 不同。"
+      },
+      {
+        "label": "共享緩衝測試來源",
+        "url": "https://github.com/amd/Triton-XDNA/blob/5c33df1263f29de30f71616780c2e8a88e623782/examples/zero_copy/shared_buffer_test.py",
+        "note": "雙向 mapping、DLPack、pool lifetime、in-place / staged 計數與 skip。"
+      },
+      {
+        "label": "IRON trace 設定",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/section-4/section-4b/README.md#L17-L120",
+        "note": "enable_trace、事件與 DDR trace buffer；不可混用不同世代事件值。"
+      },
+      {
+        "label": "IRON HSA runtime",
+        "url": "https://github.com/Xilinx/mlir-aie/blob/0ed8e7e477fd9094acee8dada7ab81604a7fb07a/programming_guide/hsa_runtime.md",
+        "note": "PDI + insts、AIE ROCR、queue fences、同步與限制。"
+      }
+    ],
+    "related": [
+      "compiler",
+      "runtime",
+      "qwen-case",
+      "validation",
+      "datatypes",
+      "synchronization"
+    ]
+  }
+]

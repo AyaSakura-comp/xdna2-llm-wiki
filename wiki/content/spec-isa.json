@@ -1,0 +1,379 @@
+[
+  {
+    "slug": "isa-registers",
+    "title": "AIE2P 暫存器：類別、寬度、編碼與重疊視圖",
+    "summary": "以固定 LLVM 後端逐層查核 GPR、地址、向量、累加器、mask、BFP 及特殊狀態，分開硬體編號、operand 類別與編譯器合成視圖。",
+    "category": "架構",
+    "status": "來源查核",
+    "tags": [
+      "AIE2P",
+      "ISA",
+      "暫存器",
+      "TableGen",
+      "arch 21"
+    ],
+    "body": "## 範圍與讀表方法\n\n本系列固定在 llvm-aie `386ca5c6634a84bb224b7248e79df8edabf0722f`。[AIE2P 版本界線](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_version.h#L14-L20)將 AIE2P 定為 **arch 21**，不是 arch 22 的 AIE2PS。本頁是公開編譯器來源的 ISA 參考，不是晶片完整程式設計手冊。下表的「數量」依明列成員或 `foreach` 範圍人工核對；不同類別常共用底層暫存器，不能逐列加總成硬體容量。\n\n閱讀時分開三件事：`Register` 的名字與 `HWEncoding`、`RegisterClass` 的可用成員與容器／spill 位寬、指令 operand 的限定集合。[暫存器寬度與 GPR](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L82-L238)的 `AIE2PGPReg<bits<5>>` 是 **5-bit 暫存器選擇碼**，而 `AIE2PScalarRegisterClass` 的值寬是 **32 bits**。`bf16`、`f32` 出現在類別可承載型別中，只證明儲存／選擇模型，不能單憑它證明某種原生算術。\n\n## 純量、地址與維度狀態\n\n| 來源名稱／類別 | 來源展開後的命名視圖數 | 值／組合位寬 | 重要限制與例子 |\n|---|---|---|---|\n| `r0…r31`／`eR` | 32 | 32 | r3 的 GPR 編號為二進位 `00011` |\n| `l0…l15`／`eL` | 16 組 | 64 | l0 的列印名是 `r1:r0`，不是新增 16 個獨立 64-bit 儲存體 |\n| `p0…p7`／`eP` | 8 | 20，spill 32 | pointer operand 類別不是主機 64-bit 指標 |\n| `m0…m7`、`dn0…dn7`、`dj0…dj7`、`dc0…dc7` | 各 8 | 各 20，spill 32 | modifier、dimension size、stride、count 分開 |\n| `d0…d7`／`eD` | 8 組 | 80，spill 128 | d0 = m0、dn0、dj0、dc0 |\n| `d0_3d…d3_3d`／`eDS` | 4 組 | 160，spill 256 | d0_3d = d0 與 d4；組語仍列印 d0 |\n| `s0…s3`／`eS` | 4 | 32 | shift／conversion 專用類別不是任意 GPR |\n\nGPR 與 spill 位寬見 [暫存器寬度與 GPR](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L82-L238)，地址組成與數量見 [地址、維度與 shift 暫存器](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L471-L601)。20-bit 類別的 `RegInfo<size=20, spill size=32, spill alignment=32>` 特別說明：有效位元與堆疊存放單位不同，不能把 spill 大小當成地址空間證明。2D／3D 描述符也不是 80／160-bit 整數 ALU 運算能力。\n\n來源有一處易誤讀：GPR pair 上方註解說「starting at R16」，但實際迴圈是 `i=0…15`、子暫存器 `2*i` 與 `2*i+1`，且 eL 明列 l0 至 l15；本頁依 **定義** 而不是該註解計數。[固定用途與 GPR 配對](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L140-L191)\n\n## W、X、Y：三種寬度，同一組向量內容\n\n| 類別／視圖 | 數量 | 每個位寬 | 子暫存器關係 |\n|---|---|---|---|\n| `wl0…wl11`、`wh0…wh11`／`VEC256` | 各 12，共 24 個半部 | 256 | 同索引 low／high 合成 X |\n| `x0…x11`／`VEC512` | 12 | 512 | x0 = wl0 + wh0 |\n| `y0…y5`／`VEC1024` | 6 | 1024 | y0 = x0 + x1 |\n| `q0…q3`／128-bit mask | 4 | 128 | ql／qh 是來源標註的 synthetic 64-bit 子視圖 |\n\n數量、偶奇集合與別名關係見 [W／X／Y 與 mask 別名](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L603-L698)；精確位元位置見 [子暫存器位元切片](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L18-L80)：`sub_256_lo=<256,0>`、`sub_256_hi=<256,256>`，`sub_512_lo=<512,0>`、`sub_512_hi=<512,512>`。因此 y0 的 bits 0–255 對應 wl0、256–511 對應 wh0、512–767 對應 wl1、768–1023 對應 wh1。這是來源子暫存器映射的推導，不是記憶體 endian 或 lane 排列保證。\n\n**工程推論：**若 x0 仍保存下一步輸入，就不能把 y0 當作不相干的暫存目的地。12×512、6×1024 與 24×256 都是同一份向量內容的不同分組；同時計入會三重計算。512-bit 可承載 64 個 i8 或 32 個 BF16 是位寬算術，不等於一條指令的矩陣形狀或有效乘加數。更多型別限制見 [資料型別](datatypes.html)。\n\n## BM、CM、DM：累加器視圖與子集合\n\n[BM／CM／DM 累加器別名](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L403-L469)以索引 0…4 建立四種 BM 半部：`bmll`、`bmlh`、`bmhl`、`bmhh`。結合 [暫存器寬度與 GPR](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L82-L238)的類別位寬可得：\n\n| 累加器視圖 | 數量 | 每個位寬 | 關係與限制 |\n|---|---|---|---|\n| BM 四組半部 | 4×5 = 20 | 512 | mBMm 收集四組；不是向量 X 的別名 |\n| `cml0…cml4`、`cmh0…cmh4` | 10 | 1024 | cml0 = bmll0 + bmlh0；cmh0 = bmhl0 + bmhh0 |\n| `dm0…dm4`／`eDM`、`ACC2048` | 5 | 2048 | dm0 = cml0 + cmh0 |\n| `eBMSLL/LH/HL/HH` | 各 4 | 512 | 此受限集合只取索引 0…3，不包含索引 4 |\n\n`ACC2048` 可表示 `v64i32`、`v32i64` 或 `v64f32`，而非單 lane 2048-bit 精度。不要把有 3-bit 選擇欄位理解成八個可配置 DM：明列 eDM 只有五個。同樣地，mBMS 子集合與完整 mBMm 不同；指令使用哪個 operand class，決定可接受哪些寄存器。[通用類別與 spill 輔助模型](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L902-L977)。\n\n## Mask、稀疏與 BFP 組合容器\n\n[稀疏組合暫存器](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L700-L763)的 `qx0…qx3` 將 X 與 Q 組成 640-bit 視圖，`qy0…qy1` 組成 1280-bit 視圖。[指數與 BFP 組合暫存器](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L766-L900)另列 12 個 64-bit 指數視圖 `e0…e11`、12 個 576-bit `ex0…ex11` 與 6 個 1152-bit `ey0…ey5`；EX 組合 512-bit X 和 64-bit E，EY 再配對 EX。稀疏 mask 加指數的 `qex0…qex3` 為 704 bits，`qey0…qey1` 為 1408 bits。\n\n這些非二次方位寬表示**資料加 metadata 的編譯器容器**，不能將 576 bits 說成 36 個原生 FP16 lane，也不能將 exponent byte 稱為一般原生 FP8 浮點乘法。它們與 X、Q、E 有重疊；配置稀疏或 BFP kernel 時，生命週期必須一起追蹤。BFP 格式名稱、API 型別、實際乘法 mode 仍要沿 [指令頁](isa-instructions.html)查核。\n\n## 特殊狀態、固定 operand 與配置陷阱\n\n| 狀態族 | 來源例子 | 讀法 |\n|---|---|---|\n| 程式／迴圈 | `lr`、`ls`、`le`、`lc`、`sp`、`core_id` | eSpecial20 明列 ls/lr/le/sp/core_id，不能把 lc 也默默列入該 20-bit 類別 |\n| FIFO | `lf0`、`lf1`、`sf` 各為 1024-bit 組合；另有 `lfe` 512-bit | low/high 視圖共用內容，不是任意一般向量 bank |\n| 控制 | `crSat`、`crRnd`、`crFPMask`、`crSRSMode`、`crUPSMode`、`crPackSize` | 來源類別不是各控制暫存器完整有效位元手冊 |\n| 狀態 | `srCarry`、`srSS0`、`srMS0`、`srFPFlags` 等 | 必須回到指令的 Uses／Defs 及外層 let |\n| 固定 GPR | r26 lock／FIFO、r28 TLAST、r31 SCD、r30 shiftx 等 singleton | 固定用途類別不是額外的實體暫存器 |\n\n特殊、FIFO 與控制狀態見 [特殊、FIFO、控制與狀態暫存器](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L240-L400)；singleton 見 [固定用途與 GPR 配對](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L140-L191)。控制／狀態段註解還明說某些 `HWEncoding` 已不具決定性，由 operand encoder 生成固定 singleton 編碼；因此不能把列出的七位二進位值直接當作任何指令皆通用的編號。[Operand wrapper 定義](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegOperandDef.td#L12-L69)與 [共用 operand encoder 規則](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/AIEBaseRegisterInfo.td#L15-L39)顯示 `OP_mXv` 等 wrapper 會選擇依 class 命名的 encoder。\n\n另有 `AIE2PVector1076FifoRegisterClass`，名稱含 1076，但實際 `AIE2PRegisterClass<1088,...>`；其 sub_ptr 20 + sub_fifo 1024 + sub_avail 32 = 1076。本文保留「1088-bit 編譯器配置容器／1076-bit 子欄位總和」的差別，不發明 1088-bit 實體 FIFO。[通用類別與 spill 輔助模型](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L902-L977)\n\n## 可重現來源目錄與下一步\n\n[下載完整 SOURCE DEFINITION 目錄](spec-data/isa-source-index.json)：本版 16 個 `.td`、2,401 筆，包含來源路徑、起訖行、原文、commit、檔案 SHA-256 與 Git blob SHA-1。`def r #i` 是一筆來源宣告，不是 extractor 自動展開出的 32 個 opcode。目錄不展開 TableGen inheritance、foreach、multiclass 或 alias，也不是完整矽晶 ISA；本文表格的命名數量是另行人工解讀。\n\n查詢順序建議為 operand 名稱 → wrapper → register class → 實際成員 → SubRegs → 指令 bit 欄位。再讀 [編碼](isa-encoding.html)與 [計算核心](compute.html)。本頁不給 ABI 可配置總量、保留暫存器完整清單、詳細延遲、硬體頻率或峰值；calling convention 與 spill 輔助宣告雖納入來源目錄，仍屬編譯器政策，不升格為物理規格。",
+    "related": [
+      "isa",
+      "compute",
+      "datatypes",
+      "isa-encoding",
+      "isa-instructions"
+    ],
+    "sources": [
+      {
+        "label": "AIE2P 版本界線",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_version.h#L14-L20",
+        "note": "C 編譯目標巨集：arch 21；非指令語義。"
+      },
+      {
+        "label": "暫存器寬度與 GPR",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L82-L238",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "地址、維度與 shift 暫存器",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L471-L601",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "固定用途與 GPR 配對",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L140-L191",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "W／X／Y 與 mask 別名",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L603-L698",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "子暫存器位元切片",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L18-L80",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "BM／CM／DM 累加器別名",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L403-L469",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "通用類別與 spill 輔助模型",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L902-L977",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "稀疏組合暫存器",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L700-L763",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "指數與 BFP 組合暫存器",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L766-L900",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "特殊、FIFO、控制與狀態暫存器",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L240-L400",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "Operand wrapper 定義",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegOperandDef.td#L12-L69",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "共用 operand encoder 規則",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/AIEBaseRegisterInfo.td#L15-L39",
+        "note": "共用 AIE 基底，只用於解讀 AIE2P 引用；不將其他 target 指令混入目錄。"
+      }
+    ]
+  },
+  {
+    "slug": "isa-encoding",
+    "title": "AIE2P 編碼：16–128-bit VLIW、slot 欄位與立即數",
+    "summary": "從 composite 與 slot 的兩層編碼推導真實 bit 位置，列出變長 bundle、operand 限制、signed／scaled immediate 與 pseudo 的邊界。",
+    "category": "架構",
+    "status": "來源查核",
+    "tags": [
+      "AIE2P",
+      "ISA",
+      "VLIW",
+      "編碼",
+      "立即數"
+    ],
+    "body": "## 先分清 bundle、slot 與來源宣告\n\n本頁只讀固定版本 AIE2P（**arch 21**；[AIE2P 版本界線](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_version.h#L14-L20)），不使用 AIE2PS arch 22。公開 TableGen 提供可核對的格式定義，但「類別數」「指令定義數」「助記符數」是不同統計；本頁不聲稱完整矽晶解碼空間。\n\n編碼有兩層：slot instruction 定義 `alu`、`mv`、`vec` 等 payload，composite 再包入長度／格式選擇位元，形成完整 `Inst`。[Slot payload 與 Size](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PSlots.td#L13-L113)為每種 slot 設獨立 `DecoderNamespace`，避免不同槽的相同位元互相衝突；[Composite 格式長度標記](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L12-L78)另以 `Formats` 解碼 namespace 表示 bundle。不能從單條 slot 的 `Size=4` 斷言它在所有組合中都獨占四 bytes。\n\n## 所有變長 bundle 寬度與尾端標記\n\n以下按來源 concatenation 的低位端列出；不是主機記憶體中的 byte dump。[Composite 格式長度標記](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L12-L78)與 [16-bit NOP 格式](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormatsInclude.td#L11-L29)\n\n| 完整 Inst 寬度 | Size（bytes） | 來源低位固定標記 | 讀法 |\n|---|---|---|---|\n| 16 | 2 | bits 3:0 = `0000` | NOP 專用，其他位元含 dontcare |\n| 32 | 4 | bits 3:0 = `1000` | 28-bit instr32 再帶子格式 |\n| 48 | 6 | bits 2:0 = `100` | 45-bit instr48；不是固定四位標記 |\n| 64 | 8 | bits 3:0 = `0010` | 60-bit instr64 |\n| 80 | 10 | bits 3:0 = `1010` | 76-bit instr80 |\n| 96 | 12 | bits 3:0 = `0110` | 92-bit instr96 |\n| 112 | 14 | bits 3:0 = `1110` | 108-bit instr112 |\n| 128 | 16 | bit 0 = `1` | 127-bit instr128；不能把其低四位整組固定 |\n\n例如 `AIE2P_instr48_Composite` 的 `Inst={instr48,0b100}` 只先決定長度族，仍須內層格式識別究竟是 LNG，或 LDA+LDB 等。16-bit NOP 則為 `{instr16,dontcare{11-1},0b0000}` 且 `instr16` 只佔一位：本頁保留 don't-care，不替它們編造唯一 canonical 機器碼。\n\n## Slot payload 寬度與可用組合\n\n| Slot 名 | payload bits | 最小獨立格式 | 不能從名字推論的事 |\n|---|---|---|---|\n| LDB | 17 | 32 bits | 名稱不是負載資料匯流排寬度 |\n| ALU | 20 | 32 bits | 不等於只能做純量加法 |\n| LNG | 42 | 48 bits | 長格式 slot，並非額外第七條可任意共發的 ALU |\n| LDA | 20 | 32 bits | 可承載多種 load／地址／stream 形式 |\n| MV | 22 | 32 bits | 包含部分向量算術 |\n| ST | 20 | 32 bits | store 之外也有 stream／地址操作 |\n| VEC | 26 | 32 bits | 不是所有 v-prefix 指令的唯一位置 |\n| NOP | 1 | 16 bits | 特殊空操作格式 |\n\n來源見 [Slot payload 與 Size](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PSlots.td#L13-L113)與 [Pseudo 與 MultiSlot 屬性](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrFormats.td#L14-L43)。[128-bit 組合與全部 Ixx 格式清單](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L1109-L1216)列出 `I32_LDA/LDB/ALU/MV/ST/VEC`、`I48_LNG`、`I48_LDA_LDB`，一直到 `I128_LDA_LDB_ST_LNG_VEC` 與 `I128_LDA_LDB_ST_ALU_MV_VEC`。後兩者示範 LNG 與 ALU+MV 的格式替換關係，而不是把七種 payload 一次全塞進 128 bits。\n\n128-bit 六槽格式原文是 `instr128={lda,ldb,st,0b0,alu,mv,0b1,vec}`，再接低位 `1`。位元數核算為 20+17+20+1+20+22+1+26+1=128。五槽長格式則以 42-bit LNG 取代 20+22 的 ALU/MV 部分，並更換辨識位元。這只證明格式存在；資料相依、register bank 限制及資源衝突仍可能禁止某個實際組合，本文不接管 cycle／itinerary 時序分析。\n\n## 具體推導：add r1, r2, r3\n\n[純量算術與位元欄位](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L14-L359)中 `ADD_alu_r_rr` 使用 `(outs eR:$d0)`、`(ins eR:$s0,eR:$s1)`，`alu={s0,d0,s1,0b0000,0b1}`。將 r2、r1、r3 的五位編號代入，得到 **20-bit slot payload**：\n\n```text\ns0      d0      s1      opcode\n00010 | 00001 | 00011 | 0000 | 1\nalu = (2<<15) | (1<<10) | (3<<5) | 1 = 0x10461\n```\n\nGPR 編號依 [暫存器寬度與 GPR](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L82-L238)。再由 [32-bit 單槽與 48-bit 組合](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L80-L204)的 `inst_alu={0b00010,alu,0b001}` 與 `Inst={instr32,0b1000}` 可推得獨立格式：\n\n| Inst 位元 | 內容 | 此例 |\n|---|---|---|\n| 31:27 | ALU 子格式前綴 | `00010` |\n| 26:7 | alu payload | `0x10461` |\n| 6:4 | ALU 子格式尾綴 | `001` |\n| 3:0 | 32-bit 長度標記 | `1000` |\n\n```text\nInst = (2<<27) | (0x10461<<7) | (1<<4) | 8\n     = 0x10823098\n```\n\n這是逐欄拼接的**靜態推導值**，未經 assembler／disassembler 執行驗證，不宣稱 bytes 的檔案排列或 relocation 規則。若同一 ADD 被包進較寬 bundle，payload 仍可查同一來源，但在完整 Inst 的位元位置會改變。`ADC` 的額外 carry Uses／Defs 在宣告外層 let，不能只讀 raw def 就漏掉隱含狀態。\n\n## Signedness、縮放與立即數例子\n\n[AIE2P immediate 清單](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PImmOperands.td#L12-L70)把 `c7s` 寫成 `txxs<7,i32>`、`c6u` 寫成 `txxu<6,i32>`；[signed 與 scaled immediate 基底](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/AIEBaseInstrInfo.td#L34-L159)分別以 `isInt<n>`／`isUInt<n>` 與 signed／unsigned decoder 解讀。`i32` 是 operand 的編譯器型別，不代表 machine encoding 一定有 32-bit immediate。\n\n| Operand | 編碼意義 | 可核對例子／邊界 |\n|---|---|---|\n| `c7s` | signed 7-bit | −64…63；−1 的七位表示為 `1111111` |\n| `c6u` | unsigned 6-bit | 0…63；用於 ACQ immediate lock id 形式 |\n| `c8s` | signed 8-bit | −128…127；ADD_NC 的 MV 形式 |\n| `c7s_negated` | 取負後須符合 signed 7-bit | predicate 檢查 −Imm；不可沿用一般 c7s 邊界 |\n| `c10s_step64` | 4-bit signed 商數，低六位為零 | −512…448、步長64；128→商2，96不合法 |\n| `c6s_step4` | 4-bit signed 商數，低兩位為零 | −32…28、步長4 |\n| `c19s_step64` | 13-bit signed 商數，stack adjustment | −262144…262080、步長64 |\n| `c12n_step4` | 9-bit 負向 stack spill 縮放形式 | 有固定負號語義，不能當成一般 signed 9-bit offset |\n\n以上數值範圍為 predicate 與縮放參數的算術推導。`ADD_add_r_ri` 的 immediate 是 7 bits，slot 排列 `{s0,d0,imm,0b110}`；`ADD_NC_mv_add_ri` 則是 `{dst(7),s0(5),imm(8),0b00}`。[純量算術與位元欄位](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L14-L359)同樣顯示「add-like」操作因 operand 類別、carry 行為及 slot 不同，不能只靠助記符前綴決定 encoding。\n\n## Pseudo、alias 與 compiler-only 不是同義詞\n\n[Pseudo 與 MultiSlot 屬性](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrFormats.td#L14-L43)把 `MultiSlot_Pseudo` 標為 `isPseudo=1`、`isCodeGenOnly=1`，並給 `materializableInto`。[PADD／MOV 多槽 materialization](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PMultiSlotPseudoInstrInfo.td#L11-L57)的 `PADD_imm_pseudo` 可選 PADDA、PADDB、PADDS 形式；一筆 pseudo 不應額外計為一條原生 opcode，也不保證一定只選第一個候選。\n\n[控制流、meta、MOV_OR 與 split pseudo](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrInfo.td#L26-L146)區分 `PseudoRET→RET`、`PseudoJL→JL_lng`、`PseudoJZ→JZ` 等 pre-scheduling expansion；`PseudoLoopEnd` 則是 meta，註解明說不自行發出。另一方面，`MOV_OR` 雖為 `isCodeGenOnly=1`，卻直接具有 ALU 位元式 `{s0,d0,s0,0b0101,0b1}`，實作 `or dst,src,src`。因此 compiler-only 不必然等於沒有編碼，pseudo 名稱也不等於組語 alias 全集。\n\n`OP_` operand wrapper 還可能使用 class-specific encoder（[Operand wrapper 定義](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegOperandDef.td#L12-L69)、[共用 operand encoder 規則](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/AIEBaseRegisterInfo.td#L15-L39)），不能把 X 暫存器名字中的十進位數無條件塞到任意欄位。此頁的 ADD 範例刻意只用直接 GPR 編號，未替複合 operand 省略 encoder 驗證。\n\n## 來源索引、重現與未完成驗證\n\n[完整 JSON 來源目錄](spec-data/isa-source-index.json)保留 2,401 筆 lexical source records：class 167、def 2,163、defm 59、defset 6、multiclass 6。它們不是 fully instantiated TableGen opcodes、展開 aliases／multiclasses，亦不是 silicon complete ISA。檔案與每筆宣告都有 immutable URL；所有選定 `.td` 的 bytes 必須與 pinned Git blob 一致才可生成。\n\n命令為 `python3 wiki/extract_isa.py --output wiki/spec-data/isa-source-index.json`。工具唯讀來源樹，不執行 TableGen 或 toolchain 安裝；JSON 順序固定且無時間戳，方便 byte-for-byte 重現。regex 會略過註解、字串與 code literal，保留巢狀、匿名宣告，但不求值外層 let／foreach；完整語义仍須回到連結的檔案上下文。\n\n尚未驗證所有 emitter／decoder C++、relocation、bundle 合法性與 silicon reserved encoding。本文不提供可直接刷入核心的 binary、所有 don't-care 的標準填值、排程延遲或硬體時脈。請接著讀 [暫存器](isa-registers.html)與 [指令族](isa-instructions.html)，將來源結構、compiler lowering 與晶片行為分開。",
+    "related": [
+      "isa",
+      "compute",
+      "isa-registers",
+      "isa-instructions"
+    ],
+    "sources": [
+      {
+        "label": "AIE2P 版本界線",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_version.h#L14-L20",
+        "note": "C 編譯目標巨集：arch 21；非指令語義。"
+      },
+      {
+        "label": "Slot payload 與 Size",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PSlots.td#L13-L113",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "Composite 格式長度標記",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L12-L78",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "16-bit NOP 格式",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormatsInclude.td#L11-L29",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "Pseudo 與 MultiSlot 屬性",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrFormats.td#L14-L43",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "128-bit 組合與全部 Ixx 格式清單",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L1109-L1216",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "純量算術與位元欄位",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L14-L359",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "暫存器寬度與 GPR",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegisterInfo.td#L82-L238",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "32-bit 單槽與 48-bit 組合",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PCompositeFormats.td#L80-L204",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "AIE2P immediate 清單",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PImmOperands.td#L12-L70",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "signed 與 scaled immediate 基底",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/AIEBaseInstrInfo.td#L34-L159",
+        "note": "共用編碼／解碼 predicate；不是另一個架構的 ISA 清單。"
+      },
+      {
+        "label": "PADD／MOV 多槽 materialization",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PMultiSlotPseudoInstrInfo.td#L11-L57",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "控制流、meta、MOV_OR 與 split pseudo",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrInfo.td#L26-L146",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "Operand wrapper 定義",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PRegOperandDef.td#L12-L69",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "共用 operand encoder 規則",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/AIEBaseRegisterInfo.td#L15-L39",
+        "note": "共用 AIE 基底，只用於解讀 AIE2P 引用；不將其他 target 指令混入目錄。"
+      }
+    ]
+  },
+  {
+    "slug": "isa-instructions",
+    "title": "AIE2P 指令族：純量、向量、搬移、控制、串流與矩陣",
+    "summary": "用完整來源宣告目錄導航主要指令族，追蹤 operand、控制字與 pseudo lowering；以具體範例區分 C helper、編譯器選擇與可編碼形式。",
+    "category": "架構",
+    "status": "來源查核",
+    "tags": [
+      "AIE2P",
+      "ISA",
+      "指令族",
+      "矩陣",
+      "來源索引"
+    ],
+    "body": "## 範圍：ISA 來源參考，不是函式名稱大全\n\n本頁固定 llvm-aie commit `386ca5c6634a84bb224b7248e79df8edabf0722f`，[AIE2P 版本界線](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_version.h#L14-L20)確認 **arch 21 AIE2P**；不引入 AIE2PS arch 22。以下「來源事實」指 TableGen 中明列的 operand、欄位與 pattern；「工程推論」指它們對 LLM kernel 的可能用途。沒有編譯、NPU 執行、cycle timing 或硬體頻率量測。\n\n[完整 SOURCE DEFINITION JSON](spec-data/isa-source-index.json)涵蓋 16 個相關 `.td` 的全部 2,401 筆詞法宣告，而非只收本文範例。單是 `AIE2PGenInstrInfo.td` 有 879 筆 def；它們是該檔來源宣告，不是整個 silicon 的指令總數。目錄另收 manual pseudo、patterns、register、formats、immediate、calling convention 與 copy materialization；不得把不同層級的筆數相加當 opcode 數。\n\n## 純量算術、邏輯、比較與位元操作\n\n| 族 | 來源可見助記符／形式 | operand／狀態要點 | LLM 工程用途 |\n|---|---|---|---|\n| 加減與 carry | `add`、`add.nc`、`adc`、`sub`、`sbc` | ADD／ADC 的 eR 與 ADD_NC 的混合目的類別不同；carry 是隱含狀態 | 索引、迴圈及寬算術拆解 |\n| 乘加 | `mul`、`mac`、`msc` | scalar operand，不能等同向量矩陣原語 | 控制或地址計算周邊工作 |\n| 邏輯／移位 | `and`、`or`、`xor`、`ashl`、`lshl` | 讀實際 eR 與固定欄位 | mask、位元處理 |\n| 比較／選擇 | `eq`、`eqz`、`ne`、`nez`、`ge`、`geu`、`lt`、`ltu`、`sel.eqz` | signed 與 unsigned 是不同形式 | 尾塊邊界、條件化 |\n| 位元與延伸 | `clb`、`clz`、`popcount`、`extend.s8/u8/s16/u16` | 窄型別延伸不能靠 host dtype 推斷 | 封裝資料、控制 mask |\n\n主要定義見 [純量算術與位元欄位](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L14-L359)，其餘 scalar 乘法與 subtract 可在目錄按 `MUL`／`MAC`／`MSC`／`SUB`／`XOR` 查找；select／popcount 的鄰近來源見 [地址更新、鎖與返回](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4245-L4420)。例如 `add r1,r2,#-1` 對應 `ADD_add_r_ri`，三個 operand 類別依序為 eR、eR、c7s；7-bit −1 與 32-bit r 值不是同一位寬概念。[AIE2P immediate 清單](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PImmOperands.td#L12-L70)和 [編碼頁](isa-encoding.html)提供欄位推導。\n\n補充直接定義：[MAC 純量乘加](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L1037-L1045)、[MSC／MUL 純量乘法](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4147-L4165)、[純量條件選擇](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4431-L4449)、[SUB 純量減法](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4882-L4890)、[XOR 純量位元運算](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L11965-L11973)。\n\n## Load／store 與地址更新：不只是一個指標\n\n[scalar load 的 indexed／post-modify 形式](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L706-L1006)中 scalar `lda`、`lda.s8`、`lda.u8`、`lda.s16`、`lda.u16` 有 indexed 與 post-modify 形式；[scalar store 形式](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4498-L4881)對應 `st`、`st.s8`、`st.s16` 及 2D／3D。名稱中的 signedness 應與載入延伸一起讀，不能把窄 store 的 `.s8` 名稱解釋成一次有號乘法。\n\n| 搬移族 | 來源名稱例 | 應追蹤的額外狀態 |\n|---|---|---|\n| Scalar 2D | `LDA_2D_s8`、`LDA_2D_u8` | dst、ptr_out、dc；輸入 ptr、mod |\n| Scalar 3D | `lda.3d`／`st.3d` | 兩組 dimension counter 及配對 descriptor |\n| Vector load A | `vlda.128`、`vlda`、`vlda.2d`、`vlda.3d` | 視形式選 W／X／BM／FIFO 等目的類別 |\n| Load 加轉換 | `vlda.conv.fp32.bf16`、`vlda.ups.2x/4x` | 與控制／shift／accumulator 類別共同閱讀 |\n| Vector load B | `vldb`、`vldb.unpack`、2D／3D 變體 | unpack sign 類別，不是假設輸入皆有號 |\n| Vector store | `vst`、`vst.pack`、`vst.srs.2x/4x` | pack／SRS 控制與來源容器 |\n| FIFO | `vlda.fill.512`、`vlda.pop.512/544/576/640/704`、`vst.push`、`vst.flush` | FIFO 與 metadata／指標狀態，不是一般矩陣 lane 數 |\n\n向量載入來源見 [VLDA、UPS 與 FIFO pop](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L6769-L7425)、[VLDB unpack 與載入](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L8000-L8692)，向量寫出見 [VST pack／SRS／FIFO 寫出](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L10246-L11049)。這些形式提供寬廣導航，並非把所有命名後綴做任意笛卡兒積；只有來源實際列出的組合才有本次證據。\n\n具體例子 `lda.2d.s8 r0,[p0],d0` 的來源 outs 是 `eR:$dst,eP:$ptr_out,eDC:$dc`、ins 是 `eP:$ptr,eD:$mod`，外層約束 `$ptr_out=$ptr`。所以組語表面只有三個參數，編譯器資料相依卻不只寫 r0。[2D load 與 signedness](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L493-L562)的 s8 與 u8 分別以 `00`／`01` 兩位作區分；20-bit LDA slot 公式為 `{ptr(3),mod(3),100,dst(5),00/01,0101}`。這裡描述的是編碼與資料相依，沒有宣稱地址更新遞迴公式、所有邊界行為或固定讀取延遲。\n\n## 向量算術、重排、轉換與非線性\n\n| 類型 | 可查來源形式 | 解讀重點 |\n|---|---|---|\n| 元素加減 | `vadd.8/.16/.32`、`vsub.8/.16/.32`、`vaddsub` | 512-bit X 類別；與 DM accumulator 的 `vadd` 不同 |\n| 比較／選擇 | `vge`、`vlt`、`vmax_lt`、`vmin_ge`、`vsel` | 產生比較結果與選擇所需狀態；BF16 形式另列 |\n| 邏輯／廣播 | `vband`、`vbor`、`vbcst`、`vbcstshfl` | 元素寬度、來源類別與模式是必要條件 |\n| 元素抽取／插入 | `vextract`、`vextbcst`、`vinsert` | immediate index 與 register index 形式不可混為一筆 |\n| 重排 | `vshift`、`vshift.align`、`vshuffle`、`vpush.hi/lo` | 服務 layout，但不自動證明特定矩陣資料順序 |\n| 轉換 | `vconv`、`vpack`、`vunpack`、`vups`、`vsrs` | sign、round、saturation／shift 控制需另讀 |\n| 非線性 | `vexp2`、`vtanh`；scalar `sqrt`、`inv`、`invsqrt` | 有宣告不等於完整 softmax／activation 或精度誤差保證 |\n\n加法見 [MV 向量加法與 VEC 累加器加法](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L5899-L6022)，broadcast／轉換／VEXP2 見 [廣播、轉換與元素抽取](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L6034-L6436)，比較與插入見 [比較與插入](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L6619-L6767)，重排與 SRS 見 [pack、選擇、shift、shuffle 與 SRS](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9962-L10244)，VTANH／unpack／UPS 見 [VTANH、unpack 與 UPS](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L11835-L11964)。其餘精確拼字及全 operand 原文可由 JSON 查詢，不能只照表名生成組語。\n\n一個反直覺的具體例子：`VADD_8` 是 `AIE2P_inst_mv_instr32`，payload 為 `{d(4),s1(4),s2(4),0,00,1101011}`；`VADD_16` 將其中尺寸兩位改為 `01`，`VADD_32` 改為 `10`。也就是 v-prefix 並不保證 VEC slot。另一方面不帶 `.8/.16/.32` 的 DM `VADD_vmac_cm2_add_reg` 才是 VEC 形式，且額外讀 eR 控制字。[MV 向量加法與 VEC 累加器加法](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L5899-L6022)\n\n## 控制流、同步、stream 與 cascade\n\n[跳躍與呼叫形式](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L432-L491)列直接地址的 LNG `J_lng`／`JL_lng`／`JZ`／`JNZ`，以及 eP 間接目標的 ALU `J_alumv_or`／`JL_alumv_or`；`JNZD` 還有 eR 輸出。[地址更新、鎖與返回](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4245-L4420)列 `RET`（組語使用 lr）、`padda/paddb/padds` 地址更新與 `rel/rel.cond`；[純量算術與位元欄位](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L14-L359)則列 `acq/acq.cond`、`done`、`event`。這些是核心指令層，不等於主機 API 的 dispatch、DMA 路由或整機同步。\n\n| 通道／控制 | 明列形式 | 具體注意事項 |\n|---|---|---|\n| Scalar input stream | `MOV_nb_lda` → `mov.nb dst,ss` | 來源 Defs 包含 srSS0，hasSideEffects=true |\n| Scalar output stream | `mov.nb ms,src`、`mov.nb.tlast ms,src` | ST slot，srMS0 狀態；r28 形式另讀固定 operand |\n| Packet header | `mov.ph`、`mov.cph` 與 nb／tlast 變體 | 不把 header 形成操作當 payload 矩陣計算 |\n| Cascade | `vmov.0/.1/.2/.3`、部分 `vmov`；`vaddmac … scd[r31]` | accumulator／cascade 路徑，與 ss／ms 分開 |\n| Lock | `acq #id,rN`、`acq.cond #id,rN,r26`、`rel` | c6u 或 GPR id 形式；r26 singleton 約束 |\n\nstream 狀態見 [非阻塞串流與 TLAST](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4083-L4146)，packet 見 [串流封包標頭形式](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L1220-L1338)，cascade 搬移見 [VMOV cascade 形式](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9131-L9437)，SCD 算術變體見 [VADDMAC 與 SCD 變體](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4946-L5421)。`nb`、TLAST、條件鎖與一般算術的阻塞／狀態契約不同；本文只確認來源欄位，不提供串流有效吞吐量、阻塞等待時間或 DMA 布線保證。\n\n## 矩陣／乘加族：operand 形狀不等於 API 形狀\n\n[VMUL 整數、BF 與 BFP 編碼](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9606-L9758)列整數 `VMUL_vmul_cm_core_X_X/X_Y/Y_X/Y_Y` 與帶 QX/QY 的稀疏輸入；BF 類型有 X_X、Y_Y，BFP 類型使用 EX_EX、EX_EY、EX_QEY、EY_QEX。[VMAC 輸入與結果](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L8763-L8930)同樣將 VMAC 的舊 accumulator `acc1` 明列為 eDM，而目的 `dst` 也是 eDM；不是從名字推定所有形式都必須與來源同一個暫存器。VADDMAC 還可有兩個 DM 累加輸入或 SCD 來源。[VADDMAC 與 SCD 變體](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4946-L5421)\n\n```text\nvmul   dm0, x0, x1, r0       ; X_X 來源形式的 operand 示例\nvmac   dm1, dm0, x0, x1, r0  ; dst 與 acc1 在定義中分列\nvmul.f dm0, y0, y1, r0       ; BF Y_Y 形式，須先準備相容控制字\n```\n\n這三行只示範**來源容許的 operand 結構**，未編譯執行；r0 內容、輸入 layout、模式及可用暫存器仍須正確設定。`VMUL_X_X` 的 VEC 公式是 `{acc(5),dst(3),111,s1(4),s2(4),000,0,1,dontcare(1),0}`；VMAC 將固定 `111` 換成三位 `acc1`。BF X_X 末位改為 1，BFP EX_EX 又有不同固定模式位。這說明模式、容器與 mnemonic 必須一同查核，不能只看 `vmul.f` 字串就等同 FP32 或 FP16 輸入乘法。[VMUL 整數、BF 與 BFP 編碼](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9606-L9758) [VMAC 輸入與結果](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L8763-L8930)\n\n[IR／intrinsic 到指令的選擇](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrPatterns.td#L261-L329)把 `int_aie2p_I1024_I1024_ACC2048_bf_mul_conf` 選到 `VMUL_f_vmul_bf_vmul_bf_core_Y_Y`，這是 **compiler selection 證據**；C++ `mmul` 的任意 M×K×N 則未在此獲得單指令保證。對 LLM GEMM，應另外計入 pack、broadcast、shuffle、轉換和累加結果抽取，詳見 [矩陣原語](mma.html)。\n\n## 32-bit 控制字：signedness 是資料，不只是名稱\n\n[VecConf 控制字與 BF16 設定](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrPatterns.td#L30-L70)的 `VecConf.all` 與 [C helper：控制字與 8×8 wrapper](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L15-L37)的 C helper 位移互相對照，控制字欄位如下。此表是已命名欄位的來源映射，不宣稱任意 amode／bmode／cmode 組合皆合法。\n\n| 位元 | 名稱 | 來源含義 |\n|---|---|---|\n| 0 | dynZeroAccum | 是否用零取代第一 accumulator 輸入 |\n| 2:1 | amode | I32=0、I64=1、FP32=2 的 accumulator mode |\n| 4:3 | bmode | 精度模式；代碼會依組合重用，不能單欄決定 dtype |\n| 7:5 | cmode／variant | 乘法模式 |\n| 8、9 | signY、signX | 0 unsigned、1 signed |\n| 10 | accShift | accumulator 左移16位 |\n| 11、12、13 | dynMulNeg、dynAcc0Neg、dynAcc1Neg | 對乘積及累加輸入的動態符號控制 |\n| 15:14 | reserved1 | 預設零，本文不指派新語義 |\n| 23:16 | dynTermNeg | 複數乘法 term 的 negation mask |\n| 31:24 | reserved2 | 預設零 |\n\n例如來源 `mulbf16_vecconf` 設 amode=2、bmode=3、cmode=1，其餘預設零，故控制字為 `(2<<1)|(3<<3)|(1<<5)=0x3c`。這裡的 FP32 指 accumulator mode；BF16 輸入則由 BF 原語與 pattern 決定。C helper 的 `mul_8x8_8x8(v64uint8,v64uint8)` 設 unsigned／amode0／bmode1／variant0 後呼叫 builtin，展示 API shape 如何先變成控制字再進 compiler；不可把每個 overload 當成不同原生指令。[VecConf 控制字與 BF16 設定](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrPatterns.td#L30-L70) [C helper：控制字與 8×8 wrapper](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L15-L37)\n\n即使來源常數叫 `BMODE_8x4`，單一名字也不足以宣稱任意 native INT4 矩陣 ISA。[C helper：INT4 unpack 展開](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L39416-L39447)的特定 `mul_4x16_16x16(v64int8,v256int4)` 明確先 shuffle、extract、兩次 unpack，再以整數 mul/mac 合成。這個反例只限制該 wrapper 的解讀，不證明所有低位寬模式皆不存在；本頁不虛構原生 FP8、IEEE FP16 或 INT4 能力。\n\n## Pseudo、模式展開與目錄使用方式\n\n[控制流、meta、MOV_OR 與 split pseudo](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrInfo.td#L26-L146)明列 `PseudoRET`、branch pseudo、`ADJCALLSTACKUP/DOWN`、`SCHED_BARRIER`、`PseudoLoopEnd`、`MOV_OR` 與 split 類別；[PADD／MOV 多槽 materialization](https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PMultiSlotPseudoInstrInfo.td#L11-L57)則列多槽 PADD／MOV materialization。`PseudoLoopEnd` 是不自行發出的 meta；`MOV_OR` 卻是 compiler-only 但有實際 OR 編碼。`defm`、匿名 `def : Pat` 和 `defset` 都是來源宣告，不能當成獨立執行的 machine instruction。\n\nJSON 每筆提供 `source_path,line_start,line_end,kind,name,raw_text,source_url`，另有 offset 與唯一 id；檔案列 SHA-256、Git blob SHA-1、行數、include 與 record_count。`name=null` 表示匿名宣告，`NAME # ...` 是未求值名字。可先搜尋 `VMUL`、`LDA_2D`、`VST` 或 `RegisterClass`，再依 kind 和檔名判別層級。raw_text **不包含外層 let／foreach 的完整上下文**，請開 immutable URL 查看其上方約束與 Uses／Defs；不可由缺少欄位推定無副作用。\n\n這是 regex-source inventory，**不是 fully instantiated TableGen opcodes、展開 aliases／multiclasses 或 silicon complete ISA**。本次 deliberate omissions 包括四個 schedule／itinerary 檔、其他架構、共用基底的遞迴目錄、完整 C/API 函式目錄、實機語義與 timing。來源檔 include 仍保留便於後續追蹤。下一步應以 [暫存器](isa-registers.html)、[編碼](isa-encoding.html)、[資料型別](datatypes.html)交叉查核，再以實際編譯結果驗證 lowering；不可用本次靜態目錄替代硬體測試。",
+    "related": [
+      "isa",
+      "compute",
+      "datatypes",
+      "mma",
+      "isa-registers",
+      "isa-encoding"
+    ],
+    "sources": [
+      {
+        "label": "AIE2P 版本界線",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_version.h#L14-L20",
+        "note": "C 編譯目標巨集：arch 21；非指令語義。"
+      },
+      {
+        "label": "純量算術與位元欄位",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L14-L359",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "地址更新、鎖與返回",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4245-L4420",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "AIE2P immediate 清單",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PImmOperands.td#L12-L70",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "scalar load 的 indexed／post-modify 形式",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L706-L1006",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "scalar store 形式",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4498-L4881",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VLDA、UPS 與 FIFO pop",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L6769-L7425",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VLDB unpack 與載入",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L8000-L8692",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VST pack／SRS／FIFO 寫出",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L10246-L11049",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "2D load 與 signedness",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L493-L562",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "MV 向量加法與 VEC 累加器加法",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L5899-L6022",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "廣播、轉換與元素抽取",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L6034-L6436",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "比較與插入",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L6619-L6767",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "pack、選擇、shift、shuffle 與 SRS",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9962-L10244",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VTANH、unpack 與 UPS",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L11835-L11964",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "跳躍與呼叫形式",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L432-L491",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "非阻塞串流與 TLAST",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4083-L4146",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "串流封包標頭形式",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L1220-L1338",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VMOV cascade 形式",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9131-L9437",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VADDMAC 與 SCD 變體",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4946-L5421",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VMUL 整數、BF 與 BFP 編碼",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L9606-L9758",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VMAC 輸入與結果",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L8763-L8930",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "IR／intrinsic 到指令的選擇",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrPatterns.td#L261-L329",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "VecConf 控制字與 BF16 設定",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrPatterns.td#L30-L70",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "C helper：控制字與 8×8 wrapper",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L15-L37",
+        "note": "只證明 C helper 如何組控制字及呼叫 builtin；不以函式數量當 ISA 數量。"
+      },
+      {
+        "label": "C helper：INT4 unpack 展開",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/clang/lib/Headers/aie2p/aie2p_vmult.h#L39416-L39447",
+        "note": "特定 wrapper 的拆解反例；不推論所有 INT4 模式不存在，也不聲稱 native INT4 矩陣能力。"
+      },
+      {
+        "label": "控制流、meta、MOV_OR 與 split pseudo",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PInstrInfo.td#L26-L146",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "PADD／MOV 多槽 materialization",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PMultiSlotPseudoInstrInfo.td#L11-L57",
+        "note": "固定版本 TableGen 來源定義；不是硬體實測或完整 ISA 保證。"
+      },
+      {
+        "label": "MAC 純量乘加",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L1037-L1045",
+        "note": "直接的來源定義與 operand／位元式；不推論 timing。"
+      },
+      {
+        "label": "MSC／MUL 純量乘法",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4147-L4165",
+        "note": "直接的來源定義與 operand／位元式；不推論 timing。"
+      },
+      {
+        "label": "純量條件選擇",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4431-L4449",
+        "note": "直接的來源定義與 operand／位元式；不推論 timing。"
+      },
+      {
+        "label": "SUB 純量減法",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L4882-L4890",
+        "note": "直接的來源定義與 operand／位元式；不推論 timing。"
+      },
+      {
+        "label": "XOR 純量位元運算",
+        "url": "https://github.com/Xilinx/llvm-aie/blob/386ca5c6634a84bb224b7248e79df8edabf0722f/llvm/lib/Target/AIE/aie2p/AIE2PGenInstrInfo.td#L11965-L11973",
+        "note": "直接的來源定義與 operand／位元式；不推論 timing。"
+      }
+    ]
+  }
+]

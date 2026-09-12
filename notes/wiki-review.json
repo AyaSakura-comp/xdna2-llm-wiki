@@ -1,0 +1,21 @@
+{
+  "passed": false,
+  "factual_errors": [
+    {
+      "slug": "glossary",
+      "section": "算术與格式 / VLIW",
+      "sentence": "Compiler 將多種操作排入 instruction bundle；有資料依賴仍會 stall",
+      "severity": "blocker",
+      "reason": "The VLIW definition implies hardware stalling on instruction data dependencies. The pinned Peano README explicitly describes an exposed pipeline without that stall logic: instructions continue in order, and the compiler schedules register-access timing. This contradicts the more precise compute and synchronization pages. Lock/stream/memory waits must not be conflated with instruction-dependency interlocks.",
+      "correction": "Compiler 將多種操作排入 instruction bundle；AIE2P 的外露管線由編譯器安排指令相依與讀寫時點，不靠一般指令相依性 stall 邏輯；lock／stream 等資料流等待是另一層問題。",
+      "evidence": [
+        "sources/llvm-aie/README.md:29-45, pinned 386ca5c6634a84bb224b7248e79df8edabf0722f: 'The processor pipeline does not include stall logic, and instructions will continue executing in order regardless of other instructions in the pipeline.'",
+        "wiki/content/hardware.json: compute / 排程、停頓與程式容量",
+        "wiki/content/hardware.json: synchronization / 陷阱與閱讀檢核"
+      ]
+    }
+  ],
+  "unsupported_claims": [],
+  "suggestions": [],
+  "summary": "Fail closed for one residual cross-page architectural contradiction in glossary; no other publication blockers found in this bounded source/math review. Read all 27 articles in hardware.json, software.json and llm.json plus both requested audit notes. Independently checked 101 local pinned citation ranges across 64 files against Git blobs and HEADs, with no byte or anchor mismatches. Spot-checked target-model capacities/topology/alignment/BD resources, BF16 helper expansion, INT4 unpacking and BFP storage; these remain appropriately distinguished from silicon timing/throughput guarantees. Recomputed the 33 KiB GEMM budget, 1 GiB KV example, 3.26 GiB ideal W4 payload, signed-i16 overflow, control bits and BFP byte counts; independently checked the published online-softmax recurrence against direct softmax using host-only arithmetic. Qwen source confirms CPU attention and LM head in npu mode, hetero-fast switching on S==1 (including one-token prompts), the unconditional _to_cpu(attn_out) call in the generic gpu/npu branch, and the documented limits of helper fallback versus unprotected fused calls. Runtime documentation and driver code support the distinct IRON XRT/HRX/HSA and Triton XRT/HSA artifact/ABI conditions. Verified hashes of all three local FLM license files against download-manifest.json: same-SHA README and TERMS.md do conflict over commercial binary use above USD 10 million annual revenue. Deployment and sources explicitly preserve this conflict and withhold unconditional commercial permission; no residual unconditional commercial-license claim was found in the reviewed article content. Public-data completeness is not presented as an NDA-complete ISA; 27 unique chapters and source code for search/LLM exports are present. This review neither built the site nor validated production exports or live deployment requirements. No NPU tests, compiler builds, installations, model execution, delegation or source/content/production edits were performed; only notes/wiki-review.json was written."
+}

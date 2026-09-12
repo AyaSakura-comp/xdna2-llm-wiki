@@ -1,0 +1,84 @@
+{
+  "publication_commit": "a854a81",
+  "base": "https://raw.githubusercontent.com/AyaSakura-comp/TempHtml/main/xdna2-llm-wiki/",
+  "checks": [
+    {
+      "path": "index.html",
+      "bytes": 26858,
+      "sha256": "a4df47d834eed5185cdb7c2ff80815db5ae8bb9b73807d1ef5945702b7ab43d2",
+      "byte_match": true
+    },
+    {
+      "path": "spec-index.html",
+      "bytes": 15877,
+      "sha256": "720ccaf7f6d9cfd5a1be22aaa6747812c38175bbc1e06bb742ad30d60cfdc920",
+      "byte_match": true
+    },
+    {
+      "path": "instruction-cycles.html",
+      "bytes": 34308,
+      "sha256": "a7a0c3f95a35c1f7bb956998836ff3e8b64bb3f67d7915d9136cd3ec259a0964",
+      "byte_match": true
+    },
+    {
+      "path": "interconnect.html",
+      "bytes": 19427,
+      "sha256": "1a40a6e50213d8d6b82ce01bc363ff420622db98578f44235ec52f2fb58ac7ad",
+      "byte_match": true
+    },
+    {
+      "path": "assets/search-data.js",
+      "bytes": 287347,
+      "sha256": "98faabc1a4c12066ac9cfe3625fb007c4c70839db0936f2dabcf835bc1ab9df8",
+      "byte_match": true
+    },
+    {
+      "path": "llms.txt",
+      "bytes": 9360,
+      "sha256": "31f7f1de7c8df8f5341ddc8b2ebca2a165c450b57a223059c9dddf099fad2d68",
+      "byte_match": true
+    },
+    {
+      "path": "llms-full.txt",
+      "bytes": 413650,
+      "sha256": "09def147c823cae4c8d03fbca0f83eadfe9c98647c7b7f8edf34f92535d061b2",
+      "byte_match": true
+    },
+    {
+      "path": "knowledge.json",
+      "bytes": 438334,
+      "sha256": "4b2b61242a79b0be88328a4053fb3e788d87459cfcb68460b2d0789c238876b4",
+      "byte_match": true
+    },
+    {
+      "path": "spec-manifest.json",
+      "bytes": 1436,
+      "sha256": "0db313235b31e784c245ac8826e4de0740299eba92eae5c440e95ed1017e119e",
+      "byte_match": true
+    },
+    {
+      "path": "spec-NOTICES.txt",
+      "bytes": 17025,
+      "sha256": "328da859b4ff055b4db795ee10b6dada99900de56acf814c1f1745310f8eca0b",
+      "byte_match": true
+    },
+    {
+      "path": "spec-data/isa-source-index.json",
+      "bytes": 1739834,
+      "sha256": "169203924e3c74f0acdc508677c3bcbb53ab70bbc1a19c544a6f21eea2add3d0",
+      "byte_match": true
+    },
+    {
+      "path": "spec-data/scheduling-model.json",
+      "bytes": 14729857,
+      "sha256": "9773c957aad6b0b4f621aa0a59f843c474b139f34fa29569690b0927d2997af5",
+      "byte_match": true
+    },
+    {
+      "path": "spec-data/registers-events.json",
+      "bytes": 13314730,
+      "sha256": "81c1a6bf4703846c1ba88b45ed06194c1f4258d71a163aa120d6958c45e387f7",
+      "byte_match": true
+    }
+  ]
+}
