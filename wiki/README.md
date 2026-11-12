@@ -33,7 +33,7 @@ E2E starts/stops its own loopback-only HTTP server, records PID/port in fixture.
 
 ## Opt-in public release smoke
 
-`tests/wiki_public_smoke.py` verifies the 45-article release's public search and spec-hub/cycle navigation. It requires explicit `XDNA_PUBLIC_WIKI_URL` pointing to index.html; it never runs as part of unittest discovery. It handles githack's informational **Open the page** consent screen. Prefer a commit-specific URL to avoid mixing cached main-branch HTML/data. The current public release is site commit `014102e74a8ab357f76297569831c1d1720e285d` (45 articles, published 2026-11-13); the first release was `a854a819b694c503e1240661a0e9fbb15021843e` (39 articles); full local E2E remains separate from this small public smoke.
+`tests/wiki_public_smoke.py` verifies the 45-article release's public search and spec-hub/cycle navigation. It requires explicit `XDNA_PUBLIC_WIKI_URL` pointing to index.html; it never runs as part of unittest discovery. It handles githack's informational **Open the page** consent screen. Prefer a commit-specific URL to avoid mixing cached main-branch HTML/data. The current public release is site commit `59fb821b844affd830df317dc34517dbceffa79d` (45 articles, published 2026-11-13); the first release was `a854a819b694c503e1240661a0e9fbb15021843e` (39 articles); full local E2E remains separate from this small public smoke.
 
 ## Add or update an article
 
@@ -41,10 +41,10 @@ Required record fields: `slug`, `title`, `summary`, `category`, `tags`, `status`
 
 ## Additions after the first public release (2026-11-12)
 
-- `data-ingress` (hardware.json): host → shim → memory tile → compute tile data path, IRON constructs, lock handshake, overlap with the core's instruction schedule, hardware event trace. It is the only article whose status contains `本機`: it quotes a compiled design and an event trace captured on the authoring host (dates in the body). `build.py` prints a different evidence note for such articles (`evidence_note` / `md_note`).
+- `data-ingress` (hardware.json): host → shim → memory tile → compute tile data path, IRON constructs, lock handshake, overlap with the core's instruction schedule, hardware event trace. It is the only article whose status contains `本機`: it quotes a compiled design and an event trace captured on the authoring host (dates in the body). `build.py` prints a different evidence note for such articles (`evidence_note` / `md_note`). An article may carry an optional `snapshot` date (used by the six 2026-11-12 articles); without it the page shows the site-wide `STAMP`.
 - `tile-microarchitecture`, `spec-gaps`, `events-debug` (edited in `compose_specs.py`, then regenerated): AMD AM027 / AM020 passages on memory adjacency (own, north, south, west), memory-tile DMA address ranges, banks and trace modes; a table separating AIE-ML (AIE2), AIE2P and AIE-ML v2 (AIE2PS). AM027/AM020 are Versal manuals, not AIE2P-specific.
 - `am027-overview`, `am027-tile`, `am027-core`, `am027-memtile`, `am027-system` (new file `content/am027.json`): Traditional Chinese summary of AMD AM027 (Versal AIE-ML v2 Architecture Manual, rev 1.1), all 60 topics read on 2026-11-12 through the documentation site. Paraphrase plus fact tables, not a copy of the manual. Each page ends with a section stating what is and is not verified for AIE2P.
-- Published 2026-11-13 as site commit `014102e74a8ab357f76297569831c1d1720e285d`; `tests/wiki_public_smoke.py` now expects 45 articles.
+- Published 2026-11-13 as site commit `59fb821b844affd830df317dc34517dbceffa79d`; `tests/wiki_public_smoke.py` now expects 45 articles.
 
 A source SHA identifies evidence; it is not a tested dependency lock. Public-document coverage is not an NDA-complete instruction manual. No NPU kernel compilation, driver change, model download/execution or NPU benchmark was performed for this wiki. All interactive timing values are mathematical lower bounds with explicit teaching assumptions.
 

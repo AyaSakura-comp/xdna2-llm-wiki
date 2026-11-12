@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 ROOT=Path(__file__).resolve().parents[1]
 HERE=ROOT/'wiki'; OUT=ROOT/'wiki-site'
 STAMP='2026-09-12'
+LAST_ADDED='2026-11-12'
 CATEGORIES=['架構','數值','程式設計','LLM推論','驗證與知識庫']
 ORDER='spec-index system tile-microarchitecture compute isa-registers vliw-pipeline instruction-cycles software-pipelining isa-encoding isa-instructions memory interconnect dma data-ingress dma-registers synchronization events-debug isa datatypes mma compiler iron triton runtime llm-graph qwen-case gemm attention kv-cache quantization prefill-decode heterogeneous deployment performance validation debug am027-overview am027-tile am027-core am027-memtile am027-system spec-gaps glossary sources wiki-method'.split()
 SPEC_FILES={'isa-source-index.json':'AIE2P ISA / register / encoding source definitions','scheduling-model.json':'AIE2P compiler itineraries, resources and operand timing','registers-events.json':'AIE2P runtime register fields and event constants'}
@@ -35,6 +36,9 @@ def load_articles():
     for a in records:
         a['backlinks']=[b['slug'] for b in records if a['slug'] in b['outgoing']]
     return records
+
+def stamp(a):
+    return a.get('snapshot',STAMP)
 
 def evidence_note(a):
     if '本機' in a['status']:
@@ -75,7 +79,7 @@ def shell(title,summary,content,records,current='index'):
     search_version=hashlib.sha256(json.dumps(records,ensure_ascii=False,sort_keys=True).encode()).hexdigest()[:12]
     return f'''<!doctype html>
 <html lang="zh-Hant"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="description" content="{esc(summary)}"><meta name="color-scheme" content="light"><title>{esc(title)} — XDNA 2 LLM Wiki</title><link rel="icon" href="assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="assets/wiki.css"><script src="assets/model.js" defer></script><script src="assets/search-data.js?v={search_version}" defer></script><script src="assets/app.js" defer></script></head>
-<body><a class="skip" href="#main">跳到正文</a><header class="topbar"><a class="wordmark" href="index.html"><span class="seal" aria-hidden="true">文</span><span>XDNA 2 <b>LLM WIKI</b></span></a><nav class="header-links" aria-label="常用連結"><a href="index.html#search">搜尋</a><a href="glossary.html">術語</a><a href="llms.txt">LLM 索引</a></nav></header><div class="layout">{nav(records,current)}<main id="main" tabindex="-1">{content}</main></div><footer class="footer">XDNA 2 / AIE2P · 繁體中文知識庫 · 來源快照 {STAMP}<br>公開文件與固定版本原始碼查核，不是完整保密 ISA 手冊；未執行 NPU 實驗。<a href="wiki-method.html">維護方法與證據界線</a> · <a href="guide/index.html">原始長篇指南</a></footer></body></html>'''
+<body><a class="skip" href="#main">跳到正文</a><header class="topbar"><a class="wordmark" href="index.html"><span class="seal" aria-hidden="true">文</span><span>XDNA 2 <b>LLM WIKI</b></span></a><nav class="header-links" aria-label="常用連結"><a href="index.html#search">搜尋</a><a href="glossary.html">術語</a><a href="llms.txt">LLM 索引</a></nav></header><div class="layout">{nav(records,current)}<main id="main" tabindex="-1">{content}</main></div><footer class="footer">XDNA 2 / AIE2P · 繁體中文知識庫 · 來源快照 {STAMP}，{LAST_ADDED} 增補<br>公開文件與固定版本原始碼查核，不是完整保密 ISA 手冊；除標為「本機」的段落外未執行 NPU 實驗。<a href="wiki-method.html">維護方法與證據界線</a> · <a href="guide/index.html">原始長篇指南</a></footer></body></html>'''
 
 def cards(records):
     return ''.join(f'''<article class="wiki-card" data-slug="{a['slug']}"><div class="card-meta">{esc(a['category'])} <span>{esc(a['status'])}</span></div><h3><a href="{a['slug']}.html">{esc(a['title'])}</a></h3><p>{esc(a['summary'])}</p><div class="tags">{' '.join(f'<span>{esc(t)}</span>' for t in a['tags'][:4])}</div></article>''' for a in records)
@@ -104,7 +108,7 @@ def article(a,records):
     body,toc=render_body(a);lookup={x['slug']:x for x in records}
     related=lambda keys:''.join(f'<a href="{k}.html">{esc(lookup[k]["title"])}</a>' for k in keys)
     source_list=''.join(f'<li><a href="{esc(s["url"])}">{esc(s["label"])}</a><span>{esc(s.get("note",""))}</span><small>{esc(s["url"])}</small></li>' for s in a['sources'])
-    return f'''<div class="breadcrumbs"><a href="index.html">首頁</a> / {esc(a['category'])}</div><div class="article-meta"><span>{esc(a['status'])}</span><span>來源快照 {STAMP}</span><a href="markdown/{a['slug']}.md" download>Markdown ↓</a></div><h1>{esc(a['title'])}</h1><p class="lede">{esc(a['summary'])}</p><div class="evidence-note">{evidence_note(a)}</div><nav class="toc" aria-label="本頁目錄"><strong>本頁導覽</strong>{''.join(f'<a href="#{id}">{esc(title)}</a>' for id,title in toc)}{'<a href="#calculator">互動計算器</a>' if calculator(a['slug']) else ''}<a href="#references">來源與延伸</a></nav><article class="article-body">{body}</article>{calculator(a['slug'])}<section id="references" class="references"><h2>來源與查核範圍</h2><ol>{source_list}</ol></section><div class="link-panels"><section><h2>接著閱讀</h2><div class="related-links">{related(a['related'])}</div></section><section><h2>哪些條目連到這裡？</h2><div class="related-links">{related(a['backlinks']) or '<p>尚無其他條目連入。</p>'}</div></section></div><a class="back-top" href="#main">回到本文頂端 ↑</a>'''
+    return f'''<div class="breadcrumbs"><a href="index.html">首頁</a> / {esc(a['category'])}</div><div class="article-meta"><span>{esc(a['status'])}</span><span>來源快照 {stamp(a)}</span><a href="markdown/{a['slug']}.md" download>Markdown ↓</a></div><h1>{esc(a['title'])}</h1><p class="lede">{esc(a['summary'])}</p><div class="evidence-note">{evidence_note(a)}</div><nav class="toc" aria-label="本頁目錄"><strong>本頁導覽</strong>{''.join(f'<a href="#{id}">{esc(title)}</a>' for id,title in toc)}{'<a href="#calculator">互動計算器</a>' if calculator(a['slug']) else ''}<a href="#references">來源與延伸</a></nav><article class="article-body">{body}</article>{calculator(a['slug'])}<section id="references" class="references"><h2>來源與查核範圍</h2><ol>{source_list}</ol></section><div class="link-panels"><section><h2>接著閱讀</h2><div class="related-links">{related(a['related'])}</div></section><section><h2>哪些條目連到這裡？</h2><div class="related-links">{related(a['backlinks']) or '<p>尚無其他條目連入。</p>'}</div></section></div><a class="back-top" href="#main">回到本文頂端 ↑</a>'''
 
 def build():
     records=load_articles();OUT.mkdir(exist_ok=True);(OUT/'assets').mkdir(exist_ok=True);(OUT/'markdown').mkdir(exist_ok=True)
@@ -125,7 +129,7 @@ def build():
     index=[];full=[];registry={}
     for a in records:
         (OUT/f"{a['slug']}.html").write_text(shell(a['title'],a['summary'],article(a,records),records,a['slug']))
-        text=f"# {a['title']}\n\n分類：{a['category']} · {a['status']} · 來源快照 {STAMP}\n\n{a['summary']}\n\n> {md_note(a)}\n\n{a['body']}\n\n## 來源\n"+'\n'.join(f"- [{s['label']}]({s['url']}) — {s.get('note','')}" for s in a['sources'])+'\n\n## 關聯\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['related'])+'\n\n## 反向連結\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['backlinks'])+'\n'
+        text=f"# {a['title']}\n\n分類：{a['category']} · {a['status']} · 來源快照 {stamp(a)}\n\n{a['summary']}\n\n> {md_note(a)}\n\n{a['body']}\n\n## 來源\n"+'\n'.join(f"- [{s['label']}]({s['url']}) — {s.get('note','')}" for s in a['sources'])+'\n\n## 關聯\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['related'])+'\n\n## 反向連結\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['backlinks'])+'\n'
         full.append(text)  # Root-level full export retains root-relative HTML/evidence links.
         # Individual Markdown files live one directory deeper; resolve local evidence separately.
         known={r['slug'] for r in records}
@@ -138,7 +142,7 @@ def build():
         (OUT/'markdown'/f"{a['slug']}.md").write_text(text)
         index.append({k:a[k] for k in ['slug','title','summary','category','tags','body','status']})
         for s in a['sources']:
-            r=registry.setdefault(s['url'],{'url':s['url'],'label':s['label'],'retrieved':STAMP,'articles':[],'notes':[]})
+            r=registry.setdefault(s['url'],{'url':s['url'],'label':s['label'],'retrieved':stamp(a),'articles':[],'notes':[]})
             r['articles'].append(a['slug'])
             if s.get('note') and s['note'] not in r['notes']:r['notes'].append(s['note'])
     (OUT/'index.html').write_text(shell('首頁','XDNA2 architecture × LLM inference：可搜尋、交叉連結與引用的繁體中文 Wiki。',home(records),records))

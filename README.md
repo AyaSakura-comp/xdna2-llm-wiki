@@ -12,7 +12,7 @@
 
 - [Wiki 首頁](https://raw.githack.com/AyaSakura-comp/TempHtml/main/xdna2-llm-wiki/index.html)
 - [規格總索引](https://raw.githack.com/AyaSakura-comp/TempHtml/main/xdna2-llm-wiki/spec-index.html)
-- [固定版本（45 篇，2026-11-13）](https://raw.githack.com/AyaSakura-comp/TempHtml/014102e74a8ab357f76297569831c1d1720e285d/xdna2-llm-wiki/index.html)
+- [固定版本（45 篇，2026-11-13）](https://raw.githack.com/AyaSakura-comp/TempHtml/59fb821b844affd830df317dc34517dbceffa79d/xdna2-llm-wiki/index.html)
 - [前一個固定驗證版本（39 篇）](https://raw.githack.com/AyaSakura-comp/TempHtml/a854a819b694c503e1240661a0e9fbb15021843e/xdna2-llm-wiki/spec-index.html)
 
 首次透過 raw.githack 開啟時，可能需要按一次 **Open the page**。
