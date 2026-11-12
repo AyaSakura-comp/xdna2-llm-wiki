@@ -2,7 +2,7 @@
 
 繁體中文、日系白底的 XDNA 2／AIE2P（arch21）LLM 技術 Wiki。涵蓋 ISA、register aliases、instruction encoding、compiler itinerary cycles、VLIW exposed pipeline、software pipelining、tile memory、interconnect、DMA／MMIO、事件除錯，以及 Transformer／GEMM／attention／KV cache／量化／異質部署。
 
-- **45 篇文章**，296 個 distinct cited URLs（線上發布版仍是 39 篇；2026-11-12 新增的 6 篇尚未發布）
+- **45 篇文章**，296 個 distinct cited URLs
 - **2,401** 筆 ISA 原始碼宣告（不是展開後 opcode 數）
 - **4,013** 筆 compiler itineraries，含 620 筆 memory records、77 種 composite formats
 - **32,185** 筆 runtime register／event macros（不是實體 register 數）
@@ -12,7 +12,8 @@
 
 - [Wiki 首頁](https://raw.githack.com/AyaSakura-comp/TempHtml/main/xdna2-llm-wiki/index.html)
 - [規格總索引](https://raw.githack.com/AyaSakura-comp/TempHtml/main/xdna2-llm-wiki/spec-index.html)
-- [固定驗證版本](https://raw.githack.com/AyaSakura-comp/TempHtml/a854a819b694c503e1240661a0e9fbb15021843e/xdna2-llm-wiki/spec-index.html)
+- [固定版本（45 篇，2026-11-13）](https://raw.githack.com/AyaSakura-comp/TempHtml/014102e74a8ab357f76297569831c1d1720e285d/xdna2-llm-wiki/index.html)
+- [前一個固定驗證版本（39 篇）](https://raw.githack.com/AyaSakura-comp/TempHtml/a854a819b694c503e1240661a0e9fbb15021843e/xdna2-llm-wiki/spec-index.html)
 
 首次透過 raw.githack 開啟時，可能需要按一次 **Open the page**。
 
