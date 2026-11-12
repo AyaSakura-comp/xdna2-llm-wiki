@@ -268,7 +268,8 @@
       "performance",
       "compiler",
       "instruction-cycles",
-      "software-pipelining"
+      "software-pipelining",
+      "am027-core"
     ]
   },
   {

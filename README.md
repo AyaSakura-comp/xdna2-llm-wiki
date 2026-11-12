@@ -2,7 +2,7 @@
 
 繁體中文、日系白底的 XDNA 2／AIE2P（arch21）LLM 技術 Wiki。涵蓋 ISA、register aliases、instruction encoding、compiler itinerary cycles、VLIW exposed pipeline、software pipelining、tile memory、interconnect、DMA／MMIO、事件除錯，以及 Transformer／GEMM／attention／KV cache／量化／異質部署。
 
-- **39 篇文章**，245 個 distinct cited URLs
+- **45 篇文章**，296 個 distinct cited URLs（線上發布版仍是 39 篇；2026-11-12 新增的 6 篇尚未發布）
 - **2,401** 筆 ISA 原始碼宣告（不是展開後 opcode 數）
 - **4,013** 筆 compiler itineraries，含 620 筆 memory records、77 種 composite formats
 - **32,185** 筆 runtime register／event macros（不是實體 register 數）
@@ -18,7 +18,7 @@
 
 ## Repository 結構
 
-- `wiki/content/`：39 篇 canonical article records
+- `wiki/content/`：45 篇 canonical article records
 - `wiki/build.py`：靜態網站、Markdown、搜尋索引及 LLM exports 產生器
 - `wiki/compose_*.py`：內容編排來源
 - `wiki/extract_*.py`：read-only pinned-source extractors
@@ -63,6 +63,8 @@ python3 tests/wiki_e2e.py
 AIE2P／arch21 不等於 AIE2PS／arch22。Compiler scheduling model 不是 silicon 實測：文章中的 cycles、resources、operand timing 與 bypass 來自固定 compiler/runtime source；不公開或未證實的實體 pipeline stage、clock、link bandwidth、hop latency、FIFO depth 均標為未知。`IssueWidth=1000` 等 scheduler sentinel 不解讀為硬體千路發射。
 
 本專案未安裝 toolchain、未編譯或執行 NPU kernel、未下載模型權重，也未修改 driver、kernel、BIOS 或 ROCm。計算器是容量／效能下界模型，不是 benchmark。
+
+例外：2026-11-12 新增的「資料上 tile」一文引用一台 Strix Halo 機器上已編譯的設計與已錄下的硬體 trace，文中標為「本機產物」並寫明日期與範圍。同日新增的五篇 `am027-*` 是 AMD AM027（Versal AIE-ML v2／AIE2PS）手冊的中文摘要；AM027 不是 AIE2P 的手冊，每篇結尾列出哪些項目有 AIE2P 來源證實、哪些沒有。
 
 ## 授權與來源
 

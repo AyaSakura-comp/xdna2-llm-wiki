@@ -9,7 +9,7 @@ ROOT=Path(__file__).resolve().parents[1]
 HERE=ROOT/'wiki'; OUT=ROOT/'wiki-site'
 STAMP='2026-09-12'
 CATEGORIES=['架構','數值','程式設計','LLM推論','驗證與知識庫']
-ORDER='spec-index system tile-microarchitecture compute isa-registers vliw-pipeline instruction-cycles software-pipelining isa-encoding isa-instructions memory interconnect dma dma-registers synchronization events-debug isa datatypes mma compiler iron triton runtime llm-graph qwen-case gemm attention kv-cache quantization prefill-decode heterogeneous deployment performance validation debug spec-gaps glossary sources wiki-method'.split()
+ORDER='spec-index system tile-microarchitecture compute isa-registers vliw-pipeline instruction-cycles software-pipelining isa-encoding isa-instructions memory interconnect dma data-ingress dma-registers synchronization events-debug isa datatypes mma compiler iron triton runtime llm-graph qwen-case gemm attention kv-cache quantization prefill-decode heterogeneous deployment performance validation debug am027-overview am027-tile am027-core am027-memtile am027-system spec-gaps glossary sources wiki-method'.split()
 SPEC_FILES={'isa-source-index.json':'AIE2P ISA / register / encoding source definitions','scheduling-model.json':'AIE2P compiler itineraries, resources and operand timing','registers-events.json':'AIE2P runtime register fields and event constants'}
 esc=lambda s:html.escape(str(s),quote=True)
 
@@ -35,6 +35,14 @@ def load_articles():
     for a in records:
         a['backlinks']=[b['slug'] for b in records if a['slug'] in b['outgoing']]
     return records
+
+def evidence_note(a):
+    if '本機' in a['status']:
+        return '本文區分官方手冊、原始碼查核、本機產物與工程推導。標為「本機」的段落來自這台機器上已編譯的設計與已錄下的硬體 trace，日期寫在正文；其餘段落沒有在本機執行。'
+    return '本文區分公開來源、原始碼查核與工程推導。未在本機執行 compiler 或 NPU；可用型別、可編譯、可派送、無 fallback、效能達標是不同證據。'
+
+def md_note(a):
+    return '官方手冊、固定版本原始碼與本機產物；本機段落的日期與範圍見正文。' if '本機' in a['status'] else '公開資料與固定版本原始碼；未執行 NPU 實測。'
 
 def render_body(a):
     soup=BeautifulSoup(markdown.markdown(a['body'],extensions=['tables','fenced_code','sane_lists']),'html.parser')
@@ -96,7 +104,7 @@ def article(a,records):
     body,toc=render_body(a);lookup={x['slug']:x for x in records}
     related=lambda keys:''.join(f'<a href="{k}.html">{esc(lookup[k]["title"])}</a>' for k in keys)
     source_list=''.join(f'<li><a href="{esc(s["url"])}">{esc(s["label"])}</a><span>{esc(s.get("note",""))}</span><small>{esc(s["url"])}</small></li>' for s in a['sources'])
-    return f'''<div class="breadcrumbs"><a href="index.html">首頁</a> / {esc(a['category'])}</div><div class="article-meta"><span>{esc(a['status'])}</span><span>來源快照 {STAMP}</span><a href="markdown/{a['slug']}.md" download>Markdown ↓</a></div><h1>{esc(a['title'])}</h1><p class="lede">{esc(a['summary'])}</p><div class="evidence-note">本文區分公開來源、原始碼查核與工程推導。未在本機執行 compiler 或 NPU；可用型別、可編譯、可派送、無 fallback、效能達標是不同證據。</div><nav class="toc" aria-label="本頁目錄"><strong>本頁導覽</strong>{''.join(f'<a href="#{id}">{esc(title)}</a>' for id,title in toc)}{'<a href="#calculator">互動計算器</a>' if calculator(a['slug']) else ''}<a href="#references">來源與延伸</a></nav><article class="article-body">{body}</article>{calculator(a['slug'])}<section id="references" class="references"><h2>來源與查核範圍</h2><ol>{source_list}</ol></section><div class="link-panels"><section><h2>接著閱讀</h2><div class="related-links">{related(a['related'])}</div></section><section><h2>哪些條目連到這裡？</h2><div class="related-links">{related(a['backlinks']) or '<p>尚無其他條目連入。</p>'}</div></section></div><a class="back-top" href="#main">回到本文頂端 ↑</a>'''
+    return f'''<div class="breadcrumbs"><a href="index.html">首頁</a> / {esc(a['category'])}</div><div class="article-meta"><span>{esc(a['status'])}</span><span>來源快照 {STAMP}</span><a href="markdown/{a['slug']}.md" download>Markdown ↓</a></div><h1>{esc(a['title'])}</h1><p class="lede">{esc(a['summary'])}</p><div class="evidence-note">{evidence_note(a)}</div><nav class="toc" aria-label="本頁目錄"><strong>本頁導覽</strong>{''.join(f'<a href="#{id}">{esc(title)}</a>' for id,title in toc)}{'<a href="#calculator">互動計算器</a>' if calculator(a['slug']) else ''}<a href="#references">來源與延伸</a></nav><article class="article-body">{body}</article>{calculator(a['slug'])}<section id="references" class="references"><h2>來源與查核範圍</h2><ol>{source_list}</ol></section><div class="link-panels"><section><h2>接著閱讀</h2><div class="related-links">{related(a['related'])}</div></section><section><h2>哪些條目連到這裡？</h2><div class="related-links">{related(a['backlinks']) or '<p>尚無其他條目連入。</p>'}</div></section></div><a class="back-top" href="#main">回到本文頂端 ↑</a>'''
 
 def build():
     records=load_articles();OUT.mkdir(exist_ok=True);(OUT/'assets').mkdir(exist_ok=True);(OUT/'markdown').mkdir(exist_ok=True)
@@ -117,7 +125,7 @@ def build():
     index=[];full=[];registry={}
     for a in records:
         (OUT/f"{a['slug']}.html").write_text(shell(a['title'],a['summary'],article(a,records),records,a['slug']))
-        text=f"# {a['title']}\n\n分類：{a['category']} · {a['status']} · 來源快照 {STAMP}\n\n{a['summary']}\n\n> 公開資料與固定版本原始碼；未執行 NPU 實測。\n\n{a['body']}\n\n## 來源\n"+'\n'.join(f"- [{s['label']}]({s['url']}) — {s.get('note','')}" for s in a['sources'])+'\n\n## 關聯\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['related'])+'\n\n## 反向連結\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['backlinks'])+'\n'
+        text=f"# {a['title']}\n\n分類：{a['category']} · {a['status']} · 來源快照 {STAMP}\n\n{a['summary']}\n\n> {md_note(a)}\n\n{a['body']}\n\n## 來源\n"+'\n'.join(f"- [{s['label']}]({s['url']}) — {s.get('note','')}" for s in a['sources'])+'\n\n## 關聯\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['related'])+'\n\n## 反向連結\n'+'\n'.join(f'- [{k}]({k}.html)' for k in a['backlinks'])+'\n'
         full.append(text)  # Root-level full export retains root-relative HTML/evidence links.
         # Individual Markdown files live one directory deeper; resolve local evidence separately.
         known={r['slug'] for r in records}

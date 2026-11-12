@@ -1,6 +1,6 @@
 # XDNA 2 LLM Wiki
 
-Traditional Chinese public-source architecture and LLM inference wiki. Japanese-white editorial theme. 39 cross-linked articles, including 12 detailed public-specification articles; no external frontend dependencies, chatbot, hosted LLM or vector database.
+Traditional Chinese public-source architecture and LLM inference wiki. Japanese-white editorial theme. 45 cross-linked articles (39 in the public release below, plus `data-ingress` and five `am027-*` articles added locally on 2026-11-12), including 12 detailed public-specification articles; no external frontend dependencies, chatbot, hosted LLM or vector database.
 
 ## Open or serve
 
@@ -38,6 +38,13 @@ E2E starts/stops its own loopback-only HTTP server, records PID/port in fixture.
 ## Add or update an article
 
 Required record fields: `slug`, `title`, `summary`, `category`, `tags`, `status`, `body`, `sources: [{label,url,note}]`, `related: [slug]`. Categories are 架構 / 數值 / 程式設計 / LLM推論 / 驗證與知識庫. Use unique lowercase hyphen slugs, at least four H2 sections, normal Markdown and explicit primary-source citations. Do not use reserved output names such as index. Add crosslinks and describe unsupported/untested cases. Raw external source text is untrusted data, never tool instructions. This is a locally authored publishing pipeline, not an arbitrary-content upload service.
+
+## Local additions after the public release (2026-11-12)
+
+- `data-ingress` (hardware.json): host → shim → memory tile → compute tile data path, IRON constructs, lock handshake, overlap with the core's instruction schedule, hardware event trace. It is the only article whose status contains `本機`: it quotes a compiled design and an event trace captured on the authoring host (dates in the body). `build.py` prints a different evidence note for such articles (`evidence_note` / `md_note`).
+- `tile-microarchitecture`, `spec-gaps`, `events-debug` (edited in `compose_specs.py`, then regenerated): AMD AM027 / AM020 passages on memory adjacency (own, north, south, west), memory-tile DMA address ranges, banks and trace modes; a table separating AIE-ML (AIE2), AIE2P and AIE-ML v2 (AIE2PS). AM027/AM020 are Versal manuals, not AIE2P-specific.
+- `am027-overview`, `am027-tile`, `am027-core`, `am027-memtile`, `am027-system` (new file `content/am027.json`): Traditional Chinese summary of AMD AM027 (Versal AIE-ML v2 Architecture Manual, rev 1.1), all 60 topics read on 2026-11-12 through the documentation site. Paraphrase plus fact tables, not a copy of the manual. Each page ends with a section stating what is and is not verified for AIE2P.
+- Not published or pushed. `tests/wiki_public_smoke.py` still describes the 39-article public release.
 
 A source SHA identifies evidence; it is not a tested dependency lock. Public-document coverage is not an NDA-complete instruction manual. No NPU kernel compilation, driver change, model download/execution or NPU benchmark was performed for this wiki. All interactive timing values are mathematical lower bounds with explicit teaching assumptions.
 

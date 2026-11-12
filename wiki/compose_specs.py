@@ -62,7 +62,7 @@ add('spec-index','XDNA2 規格總索引：ISA、cycles、VLIW、tile 與互連',
 ISA 先讀 [Peano exposed-pipeline 契約]({L}README.md#L29-L45)，tile／routing 讀 [AIETargetModel]({C}#L882-L1158)，runtime fields 讀 [AIE2P regdb header]({P}#L1-L55)。Compiler/runtime 同屬相關生態系；彼此符合可增加信心，但不是三份獨立的 silicon 測量。每次來源升版須重跑 extractor、差異審核、網站測試並保留舊 SHA；本次沒有升版既有 source snapshots，也沒有執行 NPU。
 ''')
 
-add('tile-microarchitecture','Tile 微架構：SRAM、地址視窗、banks 與三種 tile','把邏輯分區、核心私有儲存、allocator bank、硬體事件 bank 與 MMIO 位址拆開。',['tile','SRAM','banks','address','microarchitecture'],['system','memory','isa-registers','vliw-pipeline','interconnect','spec-gaps'],f'''
+add('tile-microarchitecture','Tile 微架構：SRAM、地址視窗、banks 與三種 tile','把邏輯分區、核心私有儲存、allocator bank、硬體事件 bank 與 MMIO 位址拆開。',['tile','SRAM','banks','address','microarchitecture'],['system','memory','isa-registers','vliw-pipeline','interconnect','spec-gaps','data-ingress','am027-tile'],f'''
 ## 三種 tile 的資源清單
 
 [BaseNPU2]({H}#L1077-L1145)繼承 AIE2 的共用模型，再指定 AIE2P、六列、512-bit 最大 vector alignment；完整 Strix 有八欄。row0=ShimNOC、row1=mem tile、row2–5=core。Runtime 的 [AIE2P tile 分類]({R}driver/src/device/xaie_device_aie2p.c#L24-L66)亦將 row0 視為 ShimNOC；可用 columns 仍以 partition 為準。
@@ -98,11 +98,17 @@ add('tile-microarchitecture','Tile 微架構：SRAM、地址視窗、banks 與�
 
 這是地址視窗，不是四份新分配的64KiB私有 SRAM。Mem tile 的相鄰視窗則為 west=0、self=0x80000、east=0x100000，見 [getMemLocalBaseAddress]({C}#L1579-L1603)。共用同一 buffer 必須協調 ownership；位址可見不等於 cache coherence 或 free bandwidth。
 
+**官方手冊對照（2026-11-12 取得原文）：**[AM027 Tile Architecture](https://docs.amd.com/r/en-US/am027-versal-aie-ml-v2/AIE-ML-v2-Tile-Architecture)（AIE-ML v2，rev 1.1，2025-10-23）寫明每顆核心 “interface with up to four distinct memory modules”：its own local memory module、north、south、west；陣列邊緣的核心少一到兩塊。[AM020](https://docs.amd.com/r/en-US/am020-versal-aie-ml)（AIE-ML，rev 1.5，2026-02-18）同一節的列舉相同。兩本另有一句 “can access memory modules in all four directions as one contiguous block”：這裡的四個方向是四個位址視窗，東視窗就是自己，不可讀成能存取東鄰 tile。AM027 的 Memory Tile DMA 一節列 West `0x0_0000–0x7_FFFF`、Local `0x8_0000–0xF_FFFF`、East `0x10_0000–0x17_FFFF`，只有 channel 0–3 可達左右鄰居，與上列模型值一致；memory tile 的存取介面清單裡沒有 compute 核心。
+
+這兩本是 Versal 的前一代與姊妹代手冊，不是 AIE2P 專屬文件。AIE2P 專屬的對應是 [aie-rt ELF loader]({R}driver/src/core/xaie_elfloader.c#L126-L202)：位址除以 64 KiB 得 4／5／6／7，對應南／西／北／自己（AIE2P 的 `IsCheckerBoard=0`）。核心直接讀鄰居 SRAM 在本機沒有實測；資料實際怎麼進 tile 見 [資料上 tile](data-ingress.html)。
+
 ## Allocator bank 與 event bank 的口徑差異
 
 [模型 getNumBanks]({H}#L830-L835)給 core=4、mem=8；[allocator]({M}lib/Dialect/AIE/Transforms/AIEAssignBuffers.cpp#L983-L1003)以 memory size 除以此值形成配置區間。因此得到 core 的16KiB區間、mem的64KiB區間，是**該配置模型的算術推導**。
 
 但 AIE2P runtime 的 [core-memory conflict events]({E}#L235-L255)列 `DM_BANK_0..7`，[mem-tile events]({E}#L527-L543)列 `DM_BANK_0..15`。不能說 silicon 只有4／8 banks，也不能僅憑event名稱就證明固定二對一物理配對、單埠/雙埠或 interleaving bit。這裡登錄的是**配置分區4/8，事件命名8/16**，物理映射仍待同代手冊或實驗核實。
+
+AM027 的 Memory Module 一節對姊妹代給了解釋：硬體是 8 個單埠 bank，程式視角每兩個交錯成一個，共 4 個 512-bit bank。方向與「配置分區 4、事件命名 8」相同，但那是 AIE-ML v2 的敘述，AIE2P 的實體映射仍沒有同代文件。
 
 ## SRAM 與 MMIO 是不同位址命名空間
 
@@ -113,7 +119,7 @@ Runtime 的 core program local addr=0，但 [host program window]({P}#L36-L46) o
 GEMM double buffering 要同時記帳 A/B/C、stack、靜態data、bank配置與對齊；有容量不表示三條 load/store path 無衝突。KV cache 往往超過單tile容量，應把持久資料與tile暫存分開。多core共用資料時，要追蹤哪個物理buffer由誰讀寫，不能用四個local地址當四份獨立copy。SRAM port arbitration policy、ECC每次懲罰、clock gating延遲及physical bank mapping，本次沒有足夠同代證據，不填造數字。
 ''')
 
-add('interconnect','Interconnect 規格：switch ports、packet routing 與 cascade','完整列出模型可見的 source/destination 埠資源，区分交換網路、局部 SRAM 鄰接與 cascade。',['interconnect','stream','packet','switch','cascade','routing'],['tile-microarchitecture','dma-registers','synchronization','events-debug','spec-gaps'],f'''
+add('interconnect','Interconnect 規格：switch ports、packet routing 與 cascade','完整列出模型可見的 source/destination 埠資源，区分交換網路、局部 SRAM 鄰接與 cascade。',['interconnect','stream','packet','switch','cascade','routing'],['tile-microarchitecture','dma-registers','synchronization','events-debug','spec-gaps','am027-tile'],f'''
 ## 三種互連不是同一張網
 
 1. **局部 SRAM 鄰接**：load/store 可達記憶體，見 [affinity 函式]({C}#L755-L824)。
@@ -169,7 +175,7 @@ Circuit/packet route都要有合法連接和ownership；multicast不保證每個
 工程推導可寫 `serialization cycles >= ceil(payload_bytes / effective_bytes_per_cycle)`，但分母必須由指定鏈路證據或明標假設取得；再加route/setup/backpressure。GemM broadcast、KV移動與partial-sum reduction應分別算，不把無stall kernel的MAC週期当端到端完成時間。
 ''')
 
-add('dma-registers','DMA / MMIO 規格：BD 欄位、locks、burst 與完整 register 索引','從抽象搬移操作下鑽到 AIE2P runtime 的 descriptors、field masks、地址單位與來源差異。',['DMA','MMIO','register','BD','lock','burst'],['dma','interconnect','tile-microarchitecture','events-debug','spec-gaps'],f'''
+add('dma-registers','DMA / MMIO 規格：BD 欄位、locks、burst 與完整 register 索引','從抽象搬移操作下鑽到 AIE2P runtime 的 descriptors、field masks、地址單位與來源差異。',['DMA','MMIO','register','BD','lock','burst'],['dma','interconnect','tile-microarchitecture','events-debug','spec-gaps','am027-memtile'],f'''
 ## Register database 的涵蓋範圍
 
 [xaie2pgbl_params.h]({P}#L1-L55)說明它由regdb headers產生；[events header]({E}#L1-L65)另外列事件常數。本Wiki完整擷取兩檔具值的 `XAIE2PGBL_*`／`XAIE2P_EVENTS_*` object-like宏，提供 [registers-events.json](spec-data/registers-events.json)。資料含原始expression、decimal string（若是單一literal）、file/line/source URL、SHA256；未eval任意C expression，也未觸碰hardware。
@@ -220,7 +226,7 @@ add('dma-registers','DMA / MMIO 規格：BD 欄位、locks、burst 與完整 reg
 安全資料流先取得空buffer，DMA寫完才發佈ready，core消費完才歸還；反向傳輸亦須等最後讀取完成。Core stall、DMA lock stall、stream starvation、backpressure各有event，見 [events](events-debug.html)。這些造成的等待不包含在單條算術指令的compiler operand latency內。
 ''')
 
-add('events-debug','Events 與可觀測微架構：stall、bank conflict、counters 與 trace','整理可用的事件識別欄位，說明如何區分資料相依、memory stall 與資料流阻塞。',['events','stall','trace','counter','bank conflict'],['instruction-cycles','vliw-pipeline','dma-registers','debug','spec-gaps'],f'''
+add('events-debug','Events 與可觀測微架構：stall、bank conflict、counters 與 trace','整理可用的事件識別欄位，說明如何區分資料相依、memory stall 與資料流阻塞。',['events','stall','trace','counter','bank conflict'],['instruction-cycles','vliw-pipeline','dma-registers','debug','spec-gaps','data-ingress','am027-system'],f'''
 ## Event ID 絕對不是 cycle 數
 
 [AIE2P event header]({E}#L50-L76)列出以下core事件：
@@ -261,6 +267,8 @@ add('events-debug','Events 與可觀測微架構：stall、bank conflict、count
 
 Trace buffer容量、packet輸出、共享DMA與讀回本身可能影響觀測。事件配置需透過正確runtime/platform權限；本Wiki只給來源與解讀，不要求使用者直接寫debug registers。
 
+AM027 的 Trace 一節（姊妹代）列出 core module 有 event-time 與 event-PC 兩種模式，memory module、memory tile 與 shim 只有 event-time；每個 trace unit 追蹤最多八個事件，封包為 8×32 bits。event-time 逐週期記錄事件狀態變化，event-PC 在事件成立的週期記錄 PC。兩者都不是逐指令、逐管線級的波形。本機實際錄到的事件 trace 與讀法見 [資料上 tile](data-ingress.html)。
+
 ## 建議的驗證紀錄格式
 
 ```text
@@ -275,7 +283,7 @@ DMA_bytes / completion_boundary / stalls / trace_overhead
 這是未執行的量測設計。沒有測得clock就保留cycles，不用SKU行銷TOPS反推時脈再稱為測量；沒有完整host timeline就不要報端到端tokens/s。完整來源event名稱與field數值在資料集保留，未解的同步／時鐘／counter overflow條件須列為限制。
 ''')
 
-add('spec-gaps','規格缺口與衝突：哪些已知，哪些不能由 compiler 推成 silicon','把無法核實的cycle、bank、互連與跨世代規格公開列出，避免LLM把推導當成事實。',['spec gaps','uncertainty','AIE2PS','latency','silicon'],['spec-index','instruction-cycles','tile-microarchitecture','interconnect','dma-registers','validation'],f'''
+add('spec-gaps','規格缺口與衝突：哪些已知，哪些不能由 compiler 推成 silicon','把無法核實的cycle、bank、互連與跨世代規格公開列出，避免LLM把推導當成事實。',['spec gaps','uncertainty','AIE2PS','latency','silicon'],['spec-index','instruction-cycles','tile-microarchitecture','interconnect','dma-registers','validation','am027-overview'],f'''
 ## 本次能證明的層級
 
 | 層級 | 可回答 | 不可越界 |
@@ -309,7 +317,17 @@ add('spec-gaps','規格缺口與衝突：哪些已知，哪些不能由 compiler
 
 ## AIE2P 與 AIE2PS 手冊混用風險
 
-[版本header]({L}clang/lib/Headers/aie2p/aie2p_version.h#L14-L20)鎖定arch21。AMD [AM027 portal](https://docs.amd.com/r/en-US/am027-versal-aie-ml-v2/AIE-ML-v2-Architecture)是Versal AIE-ML v2；本次抓取僅得到loading頁，未宣稱讀完完整手冊。即使拿到AM027，也須逐項比對AIE2P，而不是搬入FP8/MX6、accumulator數或pipeline圖。
+[版本header]({L}clang/lib/Headers/aie2p/aie2p_version.h#L14-L20)鎖定arch21。AMD [AM027 portal](https://docs.amd.com/r/en-US/am027-versal-aie-ml-v2/AIE-ML-v2-Architecture)是Versal AIE-ML v2；2026-09-12 抓取僅得到loading頁；2026-11-12 由文件站取得 rev 1.1 全部 60 節的文字並讀完，27 張圖只看了其中幾張；摘要分成五頁，從 [AM027 導讀](am027-overview.html) 進入。即使拿到AM027，也須逐項比對AIE2P，而不是搬入FP8/MX6、accumulator數或pipeline圖。
+
+三個名稱容易混用：
+
+| 名稱 | 編譯器代號 | 用在哪 | 官方架構手冊 |
+|---|---|---|---|
+| AIE-ML | AIE2 | Versal、XDNA 1（Phoenix／Hawk Point，`npu1`） | [AM020](https://docs.amd.com/r/en-US/am020-versal-aie-ml) |
+| AIE2P | AIE2P（arch 21） | XDNA 2（Strix／Strix Halo／Krackan，`npu2`） | 沒有公開的專屬手冊 |
+| AIE-ML v2 | AIE2PS（arch 22） | Versal AI Edge Gen 2 | [AM027](https://docs.amd.com/r/en-US/am027-versal-aie-ml-v2) |
+
+AMD 寫的 [Linux 驅動文件](https://docs.kernel.org/accel/amdxdna/amdnpu.html)描述 Strix Point 為 4x8、L2 記憶體共 4096 KB，架構細節指向 AM020。因此 AM020／AM027 可用來對照共通結構（記憶體鄰接、memory tile、trace 模式），頻寬、load 寬度、stream 寬度等數字不可直接搬到 AIE2P。
 
 具名外部研究 [Daniel Estévez的Ryzen AI 7 350案例](https://destevez.net/2026/05/getting-peak-tops-on-a-ryzen-ai-7-350-npu/)在更新中指出aie2p/aie2ps與accumulator數差別，但後文仍部分沿用AIE-MLv2資料。本Wiki把它當閱讀assembly／觀測方法的案例，不將其1.8GHz、圖中pipeline或TOPS移植成gfx1151平台保證。附帶的公開assembly圖同样是他人案例，不是本機生成或量測。
 
